@@ -1,0 +1,61 @@
+[project]
+name = "memories"
+version = "0.1.0"
+description = "A small personal memory daemon for agent workflows."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+mem = "memories.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.0.3",
+  "ruff==0.15.14",
+  "ty==0.0.39",
+  "uv==0.11.16",
+  "uv-build==0.11.16",
+]
+
+[build-system]
+requires = ["uv-build==0.11.16"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812",
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "D203",
+  "D213",
+  "PLR2004",
+  "S101",
+  "TC001",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ty.environment]
+python-version = "3.12"
+root = ["src"]
+
+[tool.ty.rules]
+possibly-missing-attribute = "error"
+unresolved-import = "error"
