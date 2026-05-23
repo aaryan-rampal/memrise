@@ -1,8 +1,8 @@
 .venv
+.env
 *.db
 *.sqlite
 *.sqlite3
 .pytest_cache/
 .ruff_cache/
 __pycache__/
-
