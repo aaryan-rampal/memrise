@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from memories.embedder import Embedding
 from memories.models import AddMemory
 from memories.service import MemoryService
 from memories.sqlite_store import SQLiteMemoryStore
@@ -94,3 +95,17 @@ def test_delete_removes_memory_from_recent_and_search(tmp_path: Path) -> None:
 
     assert service.recent(limit=5) == []
     assert service.search("SQLite", limit=5) == []
+
+
+def test_semantic_search_ranks_memories_by_cosine_similarity(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
+    store.initialize()
+    first = store.add(AddMemory(content="Memory about local recovery"))
+    second = store.add(AddMemory(content="Memory about Spotify automation"))
+    store.save_embedding(first.id, Embedding(provider="fake", model="tiny", vector=[1.0, 0.0]))
+    store.save_embedding(second.id, Embedding(provider="fake", model="tiny", vector=[0.0, 1.0]))
+
+    results = store.semantic_search(Embedding(provider="fake", model="tiny", vector=[0.8, 0.2]), 2)
+
+    assert [memory.id for memory, score in results] == [first.id, second.id]
+    assert results[0][1] > results[1][1]

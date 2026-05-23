@@ -28,6 +28,13 @@ class MemoryService:
         """Search memory content."""
         return self._store.search(query, limit)
 
+    def semantic_search(self, query: str, limit: int) -> list[tuple[Memory, float]]:
+        """Search memory content by embedding similarity."""
+        if self._embedder is None:
+            msg = "semantic search requires an embedder; use --embedder openrouter"
+            raise ValueError(msg)
+        return self._store.semantic_search(self._embedder.embed(query), limit)
+
     def update_memory(
         self,
         memory_id: str,

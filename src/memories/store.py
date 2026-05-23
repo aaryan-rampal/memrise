@@ -27,6 +27,9 @@ class MemoryStore(Protocol):
     def search(self, query: str, limit: int) -> list[Memory]:
         """Search memories and return best matches first."""
 
+    def semantic_search(self, query_embedding: Embedding, limit: int) -> list[tuple[Memory, float]]:
+        """Search memories by embedding similarity."""
+
     def update(
         self,
         memory_id: str,

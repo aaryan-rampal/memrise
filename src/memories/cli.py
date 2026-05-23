@@ -61,6 +61,10 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=8)
 
+    semantic_search = subparsers.add_parser("semantic-search")
+    semantic_search.add_argument("query")
+    semantic_search.add_argument("--limit", type=int, default=8)
+
     recent = subparsers.add_parser("recent")
     recent.add_argument("--limit", type=int, default=8)
 
@@ -102,6 +106,9 @@ def _print_guidance(args: argparse.Namespace, stdout: TextIO) -> None:
     guidance = {
         "add": "Adds one self-contained memory. Use --no-help to hide this guidance.",
         "search": "Searches saved memories with SQLite FTS5. Use --no-help to hide this guidance.",
+        "semantic-search": (
+            "Searches saved memories by embedding similarity. Use --no-help to hide this guidance."
+        ),
         "recent": "Lists newest memories first. Use --no-help to hide this guidance.",
         "update": "Updates one memory by id. Use --no-help to hide this guidance.",
         "delete": "Deletes one memory by id. Use --no-help to hide this guidance.",
@@ -122,6 +129,8 @@ def _dispatch(args: argparse.Namespace, service: MemoryService, stdout: TextIO) 
         print(f"added {memory.id}", file=stdout)
     elif args.command == "search":
         _print_memories(service.search(args.query, args.limit), stdout)
+    elif args.command == "semantic-search":
+        _print_scored_memories(service.semantic_search(args.query, args.limit), stdout)
     elif args.command == "recent":
         _print_memories(service.recent(args.limit), stdout)
     elif args.command == "update":
@@ -142,6 +151,15 @@ def _print_memories(memories: Sequence[Memory], stdout: TextIO) -> None:
     for memory in memories:
         print(
             f"{memory.id}\t{memory.source.value}\t{memory.memory_type.value}\t"
+            f"{memory.importance:.2f}\t{memory.content}",
+            file=stdout,
+        )
+
+
+def _print_scored_memories(memories: Sequence[tuple[Memory, float]], stdout: TextIO) -> None:
+    for memory, score in memories:
+        print(
+            f"{memory.id}\t{score:.4f}\t{memory.source.value}\t{memory.memory_type.value}\t"
             f"{memory.importance:.2f}\t{memory.content}",
             file=stdout,
         )

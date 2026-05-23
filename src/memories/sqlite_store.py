@@ -4,6 +4,7 @@ import sqlite3
 import time
 import uuid
 from json import dumps, loads
+from math import sqrt
 from pathlib import Path
 from typing import Any
 
@@ -158,6 +159,25 @@ class SQLiteMemoryStore:
             ).fetchall()
         return [self._memory_from_row(row) for row in rows]
 
+    def semantic_search(self, query_embedding: Embedding, limit: int) -> list[tuple[Memory, float]]:
+        """Search memory embeddings by exact cosine similarity."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.*, e.vector_json
+                FROM memory_embeddings e
+                JOIN memories m ON m.id = e.memory_id
+                """
+            ).fetchall()
+        scored = [
+            (
+                self._memory_from_row(row),
+                self._cosine_similarity(query_embedding.vector, self._vector_from_row(row)),
+            )
+            for row in rows
+        ]
+        return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
+
     def update(
         self,
         memory_id: str,
@@ -270,3 +290,24 @@ class SQLiteMemoryStore:
     def _fts_query(query: str) -> str:
         terms = [term.strip('"') for term in query.split() if term.strip('"')]
         return " ".join(f'"{term}"' for term in terms)
+
+    @staticmethod
+    def _vector_from_row(row: sqlite3.Row) -> list[float]:
+        vector = loads(row["vector_json"])
+        if not isinstance(vector, list):
+            msg = "Stored embedding vector was not a JSON array"
+            raise TypeError(msg)
+        return [float(value) for value in vector]
+
+    @staticmethod
+    def _cosine_similarity(left: list[float], right: list[float]) -> float:
+        if len(left) != len(right):
+            return 0.0
+        left_norm = sqrt(sum(value * value for value in left))
+        right_norm = sqrt(sum(value * value for value in right))
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 0.0
+        dot_product = sum(
+            left_value * right_value for left_value, right_value in zip(left, right, strict=True)
+        )
+        return dot_product / (left_norm * right_norm)

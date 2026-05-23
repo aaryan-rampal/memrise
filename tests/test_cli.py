@@ -124,3 +124,85 @@ def test_add_can_store_openrouter_embedding(tmp_path: Path) -> None:
         model="openai/text-embedding-3-small",
         vector=[0.4, 0.5],
     )
+
+
+def test_semantic_search_uses_embedder_for_query(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+
+    def post_json(
+        url: str,
+        payload: dict[str, object],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> dict[str, object]:
+        del url, headers, timeout
+        vectors = {
+            "Aaryan wants careful git recovery.": [1.0, 0.0],
+            "Aaryan wants Spotify weekly mixes.": [0.0, 1.0],
+            "recover lost commit": [0.9, 0.1],
+        }
+        return {
+            "data": [{"embedding": vectors[str(payload["input"])]}],
+            "model": "fake/embedding",
+        }
+
+    run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "--embedder",
+            "openrouter",
+            "add",
+            "Aaryan wants careful git recovery.",
+        ],
+        environ={"OPENROUTER_API_KEY": "secret"},
+        post_json=post_json,
+    )
+    run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "--embedder",
+            "openrouter",
+            "add",
+            "Aaryan wants Spotify weekly mixes.",
+        ],
+        environ={"OPENROUTER_API_KEY": "secret"},
+        post_json=post_json,
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "--embedder",
+            "openrouter",
+            "semantic-search",
+            "recover lost commit",
+            "--limit",
+            "1",
+        ],
+        environ={"OPENROUTER_API_KEY": "secret"},
+        post_json=post_json,
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert "careful git recovery" in stdout
+    assert "Spotify weekly mixes" not in stdout
+    assert "0." in stdout
+
+
+def test_semantic_search_requires_embedder(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+
+    exit_code, stdout, stderr = run_cli(
+        ["--db", str(db_path), "--no-help", "semantic-search", "recover lost commit"]
+    )
+
+    assert exit_code == 1
+    assert stdout == ""
+    assert "semantic search requires an embedder" in stderr
