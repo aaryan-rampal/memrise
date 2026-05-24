@@ -1,4 +1,5 @@
 import io
+import json
 from pathlib import Path
 
 from memories.cli import main
@@ -206,3 +207,39 @@ def test_semantic_search_requires_embedder(tmp_path: Path) -> None:
     assert exit_code == 1
     assert stdout == ""
     assert "semantic search requires an embedder" in stderr
+
+
+def test_raw_chats_canonicalize_writes_provider_jsonl(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw" / "chats"
+    output_dir = tmp_path / "canonical" / "chats"
+    codex_day = raw_dir / "codex" / "2026" / "05" / "24"
+    codex_day.mkdir(parents=True)
+    (codex_day / "rollout-1.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-24T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "session-1", "cwd": "/workspace/project"},
+            }
+        )
+        + "\n"
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--no-help",
+            "raw-chats",
+            "canonicalize",
+            "--raw-dir",
+            str(raw_dir),
+            "--output-dir",
+            str(output_dir),
+            "--provider",
+            "codex",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert "codex\t1" in stdout
+    assert (output_dir / "codex.jsonl").exists()

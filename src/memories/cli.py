@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, TextIO
 
 from memories.embedder import OpenRouterEmbedder
 from memories.models import AddMemory
+from memories.raw_chats import ensure_raw_chat_links, write_canonical_chats
 from memories.service import MemoryService
 from memories.sqlite_store import SQLiteMemoryStore
 
@@ -29,6 +30,13 @@ def main(
     """Run the `mem` command-line interface."""
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "raw-chats":
+        try:
+            _dispatch_raw_chats(args, stdout)
+        except (FileExistsError, FileNotFoundError, ValueError) as error:
+            print(f"error: {error}", file=stderr)
+            return 1
+        return 0
     store = SQLiteMemoryStore(args.db)
     store.initialize()
     try:
@@ -75,6 +83,23 @@ def _parser() -> argparse.ArgumentParser:
 
     delete = subparsers.add_parser("delete")
     delete.add_argument("id")
+
+    raw_chats = subparsers.add_parser("raw-chats")
+    raw_subparsers = raw_chats.add_subparsers(dest="raw_chats_command", required=True)
+
+    link_sources = raw_subparsers.add_parser("link-sources")
+    link_sources.add_argument("--raw-dir", type=Path, default=Path("data/raw/chats"))
+
+    canonicalize = raw_subparsers.add_parser("canonicalize")
+    canonicalize.add_argument("--raw-dir", type=Path, default=Path("data/raw/chats"))
+    canonicalize.add_argument("--output-dir", type=Path, default=Path("data/canonical/chats"))
+    canonicalize.add_argument(
+        "--provider",
+        dest="providers",
+        action="append",
+        choices=["claude-export", "claude-code", "codex", "opencode"],
+        default=None,
+    )
     return parser
 
 
@@ -112,6 +137,9 @@ def _print_guidance(args: argparse.Namespace, stdout: TextIO) -> None:
         "recent": "Lists newest memories first. Use --no-help to hide this guidance.",
         "update": "Updates one memory by id. Use --no-help to hide this guidance.",
         "delete": "Deletes one memory by id. Use --no-help to hide this guidance.",
+        "raw-chats": (
+            "Links and canonicalizes raw chat exports. Use --no-help to hide this guidance."
+        ),
     }
     print(guidance[args.command], file=stdout)
 
@@ -145,6 +173,21 @@ def _dispatch(args: argparse.Namespace, service: MemoryService, stdout: TextIO) 
     elif args.command == "delete":
         deleted = service.delete_memory(args.id)
         print(f"deleted {args.id}" if deleted else f"missing {args.id}", file=stdout)
+
+
+def _dispatch_raw_chats(args: argparse.Namespace, stdout: TextIO) -> None:
+    if args.raw_chats_command == "link-sources":
+        links = ensure_raw_chat_links(args.raw_dir)
+        for provider, path in links.items():
+            print(f"{provider}\t{path}", file=stdout)
+    elif args.raw_chats_command == "canonicalize":
+        counts = write_canonical_chats(
+            args.raw_dir,
+            args.output_dir,
+            providers=args.providers,
+        )
+        for provider, count in counts.items():
+            print(f"{provider}\t{count}", file=stdout)
 
 
 def _print_memories(memories: Sequence[Memory], stdout: TextIO) -> None:
