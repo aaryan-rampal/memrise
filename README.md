@@ -1,6 +1,6 @@
 # memories
 
-A small personal memory daemon for agent workflows.
+A small local memory daemon for agent workflows.
 
 ## v0
 
@@ -9,7 +9,8 @@ A small personal memory daemon for agent workflows.
 - Agent guidance printed by default, with `--no-help` for raw output.
 - Constrained v0 `source` and `memory_type` values.
 - SQLite FTS5 search.
-- Swappable embedder interface with an OpenRouter implementation.
+- Canonical raw chat artifacts indexed separately from curated memories.
+- Embedding code paths are temporarily disabled while retrieval quality is reviewed.
 
 ## Setup
 
@@ -20,7 +21,7 @@ uv pip install --python .venv/bin/python -e .
 ## Usage
 
 ```bash
-mem add "Aaryan wants small dogfoodable loops for personal infrastructure."
+mem add "The operator wants small dogfoodable loops for local infrastructure."
 mem search "dogfoodable loops"
 mem recent
 mem update <id> "Updated self-contained memory text."
@@ -33,10 +34,12 @@ Use a specific database file:
 mem --db ~/.local/share/memories/memories.sqlite3 add "A memory"
 ```
 
-Use OpenRouter embeddings on write:
+Search only curated memories, raw artifacts, or both:
 
 ```bash
-OPENROUTER_API_KEY=... mem --embedder openrouter add "A memory"
+mem search "deployment notes" --scope memories
+mem search "deployment notes" --scope raw
+mem search "deployment notes" --scope both
 ```
 
 Allowed sources:
@@ -49,4 +52,49 @@ Allowed memory types:
 
 ```text
 preference, fact, project_context, decision, pattern, warning
+```
+
+## Raw Chats
+
+Raw chat conversion is a two-step process:
+
+```bash
+MEMORIES_CLAUDE_EXPORT_DIR=~/Downloads/claude-export mem raw-chats link-sources
+mem raw-chats canonicalize
+mem raw-chats index
+```
+
+The default source layout is:
+
+```text
+data/raw/chats/
+  claude-export -> $MEMORIES_CLAUDE_EXPORT_DIR
+  claude-code -> ~/.claude/projects
+  codex -> ~/.codex/sessions
+  opencode -> ~/.local/share/opencode/storage
+```
+
+Canonical chats are written to `data/canonical/chats/*.jsonl`. `data/` is ignored
+because it can contain private raw text. Claude Code `~/.claude/transcripts` is
+not canonical for this project and is intentionally excluded.
+
+Tool calls and tool results are sanitized in canonical chat output. The system
+records that a tool call happened; it does not preserve raw arguments, command
+output, or tool result bodies.
+
+## Embeddings
+
+Embedding-based writes and searches are currently disabled:
+
+```bash
+mem semantic-search "query"
+mem --embedder openrouter add "A memory"
+mem raw-chats index --embed
+```
+
+Each command exits non-zero with an explicit temporary-disable message. Existing
+embedding rows can be removed idempotently:
+
+```bash
+mem embeddings clear
 ```

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -10,7 +11,7 @@ ContentItems = list[JsonObject]
 
 DEFAULT_RAW_CHAT_SOURCES = {
     "claude-export": Path(
-        "/Users/aaryanrampal/personal/hindsight-setup/ai_chats/claude/data/claude"
+        os.environ.get("MEMORIES_CLAUDE_EXPORT_DIR", "~/Downloads/claude-export")
     ),
     "claude-code": Path.home() / ".claude" / "projects",
     "codex": Path.home() / ".codex" / "sessions",
