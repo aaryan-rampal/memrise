@@ -73,6 +73,28 @@ class OpenRouterEmbedder:
             vector=_embedding_vector(response),
         )
 
+    def embed_many(self, texts: list[str]) -> list[Embedding]:
+        """Embed multiple text strings through one OpenRouter request."""
+        if not texts:
+            return []
+        payload: dict[str, object] = {"input": texts, "model": self._model}
+        if self._dimensions is not None:
+            payload["dimensions"] = self._dimensions
+        response = self._post_json(
+            OPENROUTER_EMBEDDINGS_URL,
+            payload,
+            {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            self._timeout,
+        )
+        model = str(response.get("model", self._model))
+        return [
+            Embedding(provider="openrouter", model=model, vector=vector)
+            for vector in _embedding_vectors(response, expected_count=len(texts))
+        ]
+
 
 def _post_json(
     url: str,
@@ -90,16 +112,26 @@ def _post_json(
 
 
 def _embedding_vector(response: dict[str, object]) -> list[float]:
+    return _embedding_vectors(response, expected_count=1)[0]
+
+
+def _embedding_vectors(response: dict[str, object], *, expected_count: int) -> list[list[float]]:
     data = response.get("data")
     if not isinstance(data, list) or not data:
         msg = "OpenRouter embedding response did not include data"
         raise ValueError(msg)
-    first = data[0]
-    if not isinstance(first, dict):
+    if len(data) != expected_count:
+        msg = f"OpenRouter returned {len(data)} embeddings for {expected_count} inputs"
+        raise ValueError(msg)
+    return [_embedding_from_item(item) for item in data]
+
+
+def _embedding_from_item(item: object) -> list[float]:
+    if not isinstance(item, dict):
         msg = "OpenRouter embedding response data item was invalid"
         raise TypeError(msg)
-    first_item = cast("dict[str, object]", first)
-    embedding = first_item.get("embedding")
+    item_data = cast("dict[str, object]", item)
+    embedding = item_data.get("embedding")
     if not isinstance(embedding, list):
         msg = "OpenRouter embedding response did not include an embedding vector"
         raise TypeError(msg)

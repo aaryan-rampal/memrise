@@ -89,3 +89,17 @@ class Memory:
     importance: float
     created_at: int
     updated_at: int
+
+
+@dataclass(frozen=True)
+class RawArtifact:
+    """Indexed raw canonical chat artifact."""
+
+    id: str
+    provider: str
+    source_path: str
+    source_conversation_id: str
+    message_id: str
+    role: str
+    created_at: str | None
+    content: str

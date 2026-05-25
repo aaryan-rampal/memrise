@@ -7,10 +7,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from memories.embedder import OpenRouterEmbedder
-from memories.models import AddMemory
+from memories.models import AddMemory, RawArtifact
+from memories.raw_artifacts import RawArtifactIndexOptions, index_canonical_chats
 from memories.raw_chats import ensure_raw_chat_links, write_canonical_chats
 from memories.service import MemoryService
 from memories.sqlite_store import SQLiteMemoryStore
+
+DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+EMBEDDINGS_DISABLED_MESSAGE = (
+    "embedding features are temporarily disabled; use lexical search while embeddings are reviewed"
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -30,22 +36,37 @@ def main(
     """Run the `mem` command-line interface."""
     parser = _parser()
     args = parser.parse_args(argv)
+    store = SQLiteMemoryStore(args.db)
+    if args.command == "embeddings":
+        try:
+            _dispatch_embeddings(args, store, stdout)
+        except ValueError as error:
+            print(f"error: {error}", file=stderr)
+            return 1
+        return 0
     if args.command == "raw-chats":
         try:
-            _dispatch_raw_chats(args, stdout)
+            _reject_embedding_flags(args)
+            _dispatch_raw_chats(
+                args,
+                store,
+                stdout,
+                environ or os.environ,
+                post_json,
+            )
         except (FileExistsError, FileNotFoundError, ValueError) as error:
             print(f"error: {error}", file=stderr)
             return 1
         return 0
-    store = SQLiteMemoryStore(args.db)
     store.initialize()
     try:
+        _reject_embedding_flags(args)
         service = MemoryService(
             store,
             embedder=_embedder_from_args(args, environ or os.environ, post_json),
         )
         _print_guidance(args, stdout)
-        _dispatch(args, service, stdout)
+        _dispatch(args, service, store, stdout)
     except ValueError as error:
         print(f"error: {error}", file=stderr)
         return 1
@@ -57,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, default=Path("memories.sqlite3"))
     parser.add_argument("--no-help", action="store_true")
     parser.add_argument("--embedder", choices=["none", "openrouter"], default="none")
-    parser.add_argument("--embedding-model", default="openai/text-embedding-3-small")
+    parser.add_argument("--embedding-model", default=None)
     parser.add_argument("--embedding-dimensions", type=int, default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -68,10 +89,27 @@ def _parser() -> argparse.ArgumentParser:
     search = subparsers.add_parser("search")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=8)
+    search.add_argument(
+        "--scope",
+        choices=["auto", "memories", "raw", "both"],
+        default="auto",
+    )
 
     semantic_search = subparsers.add_parser("semantic-search")
     semantic_search.add_argument("query")
     semantic_search.add_argument("--limit", type=int, default=8)
+    semantic_search.add_argument(
+        "--scope",
+        choices=["auto", "memories", "raw", "both"],
+        default="auto",
+    )
+
+    embeddings = subparsers.add_parser("embeddings")
+    embeddings_subparsers = embeddings.add_subparsers(
+        dest="embeddings_command",
+        required=True,
+    )
+    embeddings_subparsers.add_parser("clear")
 
     recent = subparsers.add_parser("recent")
     recent.add_argument("--limit", type=int, default=8)
@@ -100,6 +138,18 @@ def _parser() -> argparse.ArgumentParser:
         choices=["claude-export", "claude-code", "codex", "opencode"],
         default=None,
     )
+
+    index = raw_subparsers.add_parser("index")
+    index.add_argument("--canonical-dir", type=Path, default=Path("data/canonical/chats"))
+    index.add_argument(
+        "--provider",
+        dest="providers",
+        action="append",
+        choices=["claude-export", "claude-code", "codex", "opencode"],
+        default=None,
+    )
+    index.add_argument("--embed", action="store_true")
+    index.add_argument("--rebuild-embeddings", action="store_true")
     return parser
 
 
@@ -119,10 +169,31 @@ def _embedder_from_args(
     api_key = environ.get("OPENROUTER_API_KEY", "")
     return OpenRouterEmbedder(
         api_key=api_key,
-        model=args.embedding_model,
+        model=args.embedding_model or DEFAULT_EMBEDDING_MODEL,
         dimensions=args.embedding_dimensions,
         post_json=post_json,
     )
+
+
+def _reject_embedding_flags(args: argparse.Namespace) -> None:
+    if args.command == "semantic-search":
+        raise ValueError(EMBEDDINGS_DISABLED_MESSAGE)
+    if args.embedder != "none":
+        raise ValueError(EMBEDDINGS_DISABLED_MESSAGE)
+    if getattr(args, "embed", False):
+        raise ValueError(EMBEDDINGS_DISABLED_MESSAGE)
+
+
+def _dispatch_embeddings(
+    args: argparse.Namespace,
+    store: SQLiteMemoryStore,
+    stdout: TextIO,
+) -> None:
+    store.initialize()
+    if args.embeddings_command == "clear":
+        memory_count, raw_count = store.clear_all_embeddings()
+        print(f"memory-embeddings-cleared\t{memory_count}", file=stdout)
+        print(f"raw-embeddings-cleared\t{raw_count}", file=stdout)
 
 
 def _print_guidance(args: argparse.Namespace, stdout: TextIO) -> None:
@@ -144,7 +215,12 @@ def _print_guidance(args: argparse.Namespace, stdout: TextIO) -> None:
     print(guidance[args.command], file=stdout)
 
 
-def _dispatch(args: argparse.Namespace, service: MemoryService, stdout: TextIO) -> None:
+def _dispatch(
+    args: argparse.Namespace,
+    service: MemoryService,
+    store: SQLiteMemoryStore,
+    stdout: TextIO,
+) -> None:
     if args.command == "add":
         memory = service.add_memory(
             AddMemory(
@@ -156,9 +232,9 @@ def _dispatch(args: argparse.Namespace, service: MemoryService, stdout: TextIO) 
         )
         print(f"added {memory.id}", file=stdout)
     elif args.command == "search":
-        _print_memories(service.search(args.query, args.limit), stdout)
+        _print_search(args, service, store, stdout)
     elif args.command == "semantic-search":
-        _print_scored_memories(service.semantic_search(args.query, args.limit), stdout)
+        _print_semantic_search(args, service, store, stdout)
     elif args.command == "recent":
         _print_memories(service.recent(args.limit), stdout)
     elif args.command == "update":
@@ -175,7 +251,13 @@ def _dispatch(args: argparse.Namespace, service: MemoryService, stdout: TextIO) 
         print(f"deleted {args.id}" if deleted else f"missing {args.id}", file=stdout)
 
 
-def _dispatch_raw_chats(args: argparse.Namespace, stdout: TextIO) -> None:
+def _dispatch_raw_chats(
+    args: argparse.Namespace,
+    store: SQLiteMemoryStore,
+    stdout: TextIO,
+    environ: Mapping[str, str],
+    post_json: HttpPost | None,
+) -> None:
     if args.raw_chats_command == "link-sources":
         links = ensure_raw_chat_links(args.raw_dir)
         for provider, path in links.items():
@@ -188,6 +270,81 @@ def _dispatch_raw_chats(args: argparse.Namespace, stdout: TextIO) -> None:
         )
         for provider, count in counts.items():
             print(f"{provider}\t{count}", file=stdout)
+    elif args.raw_chats_command == "index":
+        store.initialize()
+        if args.embed and args.embedding_model is None:
+            msg = "raw chat embedding requires explicit --embedding-model"
+            raise ValueError(msg)
+        embedder = _embedder_from_args(args, environ, post_json) if args.embed else None
+        if args.embed and embedder is None:
+            msg = "raw chat embedding requires --embedder openrouter"
+            raise ValueError(msg)
+        count = index_canonical_chats(
+            store,
+            args.canonical_dir,
+            RawArtifactIndexOptions(
+                providers=args.providers,
+                embedder=embedder,
+                rebuild_embeddings=args.rebuild_embeddings,
+                log=lambda message: print(message, file=stdout),
+            ),
+        )
+        if args.embed:
+            print(f"raw-embeddings\t{count}", file=stdout)
+
+
+def _print_search(
+    args: argparse.Namespace,
+    service: MemoryService,
+    store: SQLiteMemoryStore,
+    stdout: TextIO,
+) -> None:
+    scope = _resolved_scope(args.scope, args.query, store)
+    if scope == "memories":
+        _print_memories(service.search(args.query, args.limit), stdout)
+        return
+    if scope == "raw":
+        _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), stdout)
+        return
+    _print_memory_hits(service.search(args.query, args.limit), stdout)
+    _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), stdout)
+
+
+def _print_semantic_search(
+    args: argparse.Namespace,
+    service: MemoryService,
+    store: SQLiteMemoryStore,
+    stdout: TextIO,
+) -> None:
+    scope = _resolved_scope(args.scope, args.query, store)
+    query_embedding = service.embed_query(args.query)
+    if scope == "memories":
+        _print_scored_memories(store.semantic_search(query_embedding, args.limit), stdout)
+        return
+    if scope == "raw":
+        _print_scored_raw_artifacts(
+            store.semantic_search_raw_artifacts(query_embedding, args.limit),
+            stdout,
+        )
+        return
+    _print_scored_memory_hits(store.semantic_search(query_embedding, args.limit), stdout)
+    _print_scored_raw_artifacts(
+        store.semantic_search_raw_artifacts(query_embedding, args.limit),
+        stdout,
+    )
+
+
+def _resolved_scope(scope: str, query: str, store: SQLiteMemoryStore) -> str:
+    if scope != "auto":
+        return scope
+    if store.raw_artifact_count() == 0:
+        return "memories"
+    normalized = query.lower()
+    if any(term in normalized for term in ("raw", "transcript", "chat", "tool", "session")):
+        return "raw"
+    if any(term in normalized for term in ("memory", "preference", "decision", "remember")):
+        return "memories"
+    return "both"
 
 
 def _print_memories(memories: Sequence[Memory], stdout: TextIO) -> None:
@@ -199,11 +356,50 @@ def _print_memories(memories: Sequence[Memory], stdout: TextIO) -> None:
         )
 
 
+def _print_memory_hits(memories: Sequence[Memory], stdout: TextIO) -> None:
+    for memory in memories:
+        print(
+            f"memory\t{memory.id}\t{memory.source.value}\t{memory.memory_type.value}\t"
+            f"{memory.importance:.2f}\t{memory.content}",
+            file=stdout,
+        )
+
+
 def _print_scored_memories(memories: Sequence[tuple[Memory, float]], stdout: TextIO) -> None:
     for memory, score in memories:
         print(
             f"{memory.id}\t{score:.4f}\t{memory.source.value}\t{memory.memory_type.value}\t"
             f"{memory.importance:.2f}\t{memory.content}",
+            file=stdout,
+        )
+
+
+def _print_scored_memory_hits(memories: Sequence[tuple[Memory, float]], stdout: TextIO) -> None:
+    for memory, score in memories:
+        print(
+            f"memory\t{memory.id}\t{score:.4f}\t{memory.source.value}\t"
+            f"{memory.memory_type.value}\t{memory.importance:.2f}\t{memory.content}",
+            file=stdout,
+        )
+
+
+def _print_raw_artifacts(artifacts: Sequence[RawArtifact], stdout: TextIO) -> None:
+    for artifact in artifacts:
+        print(
+            f"raw\t{artifact.provider}\t{artifact.source_conversation_id}\t"
+            f"{artifact.message_id}\t{artifact.role}\t{artifact.content}",
+            file=stdout,
+        )
+
+
+def _print_scored_raw_artifacts(
+    artifacts: Sequence[tuple[RawArtifact, float]],
+    stdout: TextIO,
+) -> None:
+    for artifact, score in artifacts:
+        print(
+            f"raw\t{score:.4f}\t{artifact.provider}\t{artifact.source_conversation_id}\t"
+            f"{artifact.message_id}\t{artifact.role}\t{artifact.content}",
             file=stdout,
         )
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from memories.embedder import Embedder
+from memories.embedder import Embedder, Embedding
 from memories.models import AddMemory, Memory
 from memories.store import MemoryStore
 
@@ -30,10 +30,14 @@ class MemoryService:
 
     def semantic_search(self, query: str, limit: int) -> list[tuple[Memory, float]]:
         """Search memory content by embedding similarity."""
+        return self._store.semantic_search(self.embed_query(query), limit)
+
+    def embed_query(self, query: str) -> Embedding:
+        """Embed a search query."""
         if self._embedder is None:
             msg = "semantic search requires an embedder; use --embedder openrouter"
             raise ValueError(msg)
-        return self._store.semantic_search(self._embedder.embed(query), limit)
+        return self._embedder.embed(query)
 
     def update_memory(
         self,

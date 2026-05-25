@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from memories.embedder import Embedding
-from memories.models import AddMemory, Memory, MemoryType, Source, validate_importance
+from memories.models import AddMemory, Memory, MemoryType, RawArtifact, Source, validate_importance
 
 
 class SQLiteMemoryStore:
@@ -46,6 +46,30 @@ class SQLiteMemoryStore:
                     vector_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS raw_artifacts (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    source_conversation_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT,
+                    content TEXT NOT NULL
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS raw_artifact_fts
+                USING fts5(id UNINDEXED, content);
+
+                CREATE TABLE IF NOT EXISTS raw_artifact_embeddings (
+                    artifact_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    vector_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY (artifact_id) REFERENCES raw_artifacts(id) ON DELETE CASCADE
                 );
                 """
             )
@@ -178,6 +202,259 @@ class SQLiteMemoryStore:
         ]
         return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
 
+    def upsert_raw_artifact(self, artifact: RawArtifact) -> None:
+        """Persist a raw chat artifact and index it for FTS search."""
+        self.upsert_raw_artifacts([artifact])
+
+    def upsert_raw_artifacts(self, artifacts: list[RawArtifact]) -> None:
+        """Persist raw chat artifacts and index them for FTS search."""
+        if not artifacts:
+            return
+        for artifact in artifacts:
+            self._validate_raw_artifact(artifact)
+        values = [self._raw_artifact_values(artifact) for artifact in artifacts]
+        fts_values = [(artifact.id, artifact.content) for artifact in artifacts]
+        with self._connect() as connection:
+            connection.executemany(
+                "DELETE FROM raw_artifact_fts WHERE id = ?",
+                [(artifact.id,) for artifact in artifacts],
+            )
+            connection.executemany(
+                """
+                INSERT INTO raw_artifacts
+                  (
+                    id,
+                    provider,
+                    source_path,
+                    source_conversation_id,
+                    message_id,
+                    role,
+                    created_at,
+                    content
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  provider = excluded.provider,
+                  source_path = excluded.source_path,
+                  source_conversation_id = excluded.source_conversation_id,
+                  message_id = excluded.message_id,
+                  role = excluded.role,
+                  created_at = excluded.created_at,
+                  content = excluded.content
+                """,
+                values,
+            )
+            connection.executemany(
+                "INSERT INTO raw_artifact_fts (id, content) VALUES (?, ?)",
+                fts_values,
+            )
+
+    def replace_raw_artifacts(
+        self, artifacts: list[RawArtifact], providers: list[str] | None
+    ) -> None:
+        """Replace indexed raw artifacts for the selected providers."""
+        for artifact in artifacts:
+            self._validate_raw_artifact(artifact)
+        with self._connect() as connection:
+            self._delete_stale_raw_artifacts(connection, artifacts, providers)
+            if not artifacts:
+                return
+            connection.executemany(
+                "DELETE FROM raw_artifact_fts WHERE id = ?",
+                [(artifact.id,) for artifact in artifacts],
+            )
+            connection.executemany(
+                """
+                INSERT INTO raw_artifacts
+                  (
+                    id,
+                    provider,
+                    source_path,
+                    source_conversation_id,
+                    message_id,
+                    role,
+                    created_at,
+                    content
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  provider = excluded.provider,
+                  source_path = excluded.source_path,
+                  source_conversation_id = excluded.source_conversation_id,
+                  message_id = excluded.message_id,
+                  role = excluded.role,
+                  created_at = excluded.created_at,
+                  content = excluded.content
+                """,
+                [self._raw_artifact_values(artifact) for artifact in artifacts],
+            )
+            connection.executemany(
+                "INSERT INTO raw_artifact_fts (id, content) VALUES (?, ?)",
+                [(artifact.id, artifact.content) for artifact in artifacts],
+            )
+
+    def search_raw_artifacts(self, query: str, limit: int) -> list[RawArtifact]:
+        """Search raw chat artifacts using SQLite FTS5."""
+        fts_query = self._fts_query(query)
+        if not fts_query:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.*
+                FROM raw_artifact_fts f
+                JOIN raw_artifacts r ON r.id = f.id
+                WHERE raw_artifact_fts MATCH ?
+                ORDER BY bm25(raw_artifact_fts)
+                LIMIT ?
+                """,
+                (fts_query, limit),
+            ).fetchall()
+        return [self._raw_artifact_from_row(row) for row in rows]
+
+    def raw_artifact_count(self) -> int:
+        """Return the number of indexed raw artifacts."""
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM raw_artifacts").fetchone()
+        return int(row["count"])
+
+    def save_raw_artifact_embedding(self, artifact_id: str, embedding: Embedding) -> None:
+        """Persist one embedding for a raw artifact."""
+        self.save_raw_artifact_embeddings([(artifact_id, embedding)])
+
+    def save_raw_artifact_embeddings(
+        self,
+        embeddings: list[tuple[str, Embedding]],
+    ) -> None:
+        """Persist embeddings for raw artifacts."""
+        if not embeddings:
+            return
+        with self._connect() as connection:
+            missing = self._missing_raw_artifact_ids(connection, embeddings)
+            if missing:
+                msg = f"Raw artifact '{missing[0]}' does not exist"
+                raise ValueError(msg)
+            connection.executemany(
+                """
+                INSERT INTO raw_artifact_embeddings
+                  (artifact_id, provider, model, dimensions, vector_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_id) DO UPDATE SET
+                  provider = excluded.provider,
+                  model = excluded.model,
+                  dimensions = excluded.dimensions,
+                  vector_json = excluded.vector_json,
+                  created_at = excluded.created_at
+                """,
+                [
+                    (
+                        artifact_id,
+                        embedding.provider,
+                        embedding.model,
+                        embedding.dimensions,
+                        dumps(embedding.vector),
+                        int(time.time()),
+                    )
+                    for artifact_id, embedding in embeddings
+                ],
+            )
+
+    def clear_raw_artifact_embeddings(self, providers: list[str] | None = None) -> None:
+        """Delete raw artifact embeddings for the selected providers."""
+        with self._connect() as connection:
+            if providers is None:
+                connection.execute("DELETE FROM raw_artifact_embeddings")
+                return
+            for provider in providers:
+                connection.execute(
+                    """
+                    DELETE FROM raw_artifact_embeddings
+                    WHERE artifact_id IN (
+                      SELECT id FROM raw_artifacts WHERE provider = ?
+                    )
+                    """,
+                    (provider,),
+                )
+
+    def raw_artifact_embedding_count(self) -> int:
+        """Return the number of raw artifact embeddings."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM raw_artifact_embeddings"
+            ).fetchone()
+        return int(row["count"])
+
+    def raw_artifact_ids_with_embedding_model(self, model: str) -> set[str]:
+        """Return raw artifact ids already embedded with a model."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT artifact_id FROM raw_artifact_embeddings WHERE lower(model) = lower(?)",
+                (model,),
+            ).fetchall()
+        return {row["artifact_id"] for row in rows}
+
+    def clear_all_embeddings(self) -> tuple[int, int]:
+        """Delete all memory and raw artifact embeddings."""
+        with self._connect() as connection:
+            memory_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM memory_embeddings"
+            ).fetchone()["count"]
+            raw_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM raw_artifact_embeddings"
+            ).fetchone()["count"]
+            connection.execute("DELETE FROM memory_embeddings")
+            connection.execute("DELETE FROM raw_artifact_embeddings")
+        return int(memory_count), int(raw_count)
+
+    def get_raw_artifact_embedding(self, artifact_id: str) -> Embedding | None:
+        """Return one stored raw artifact embedding by artifact id."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM raw_artifact_embeddings WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Embedding(
+            provider=row["provider"],
+            model=row["model"],
+            vector=[float(value) for value in loads(row["vector_json"])],
+        )
+
+    def semantic_search_raw_artifacts(
+        self,
+        query_embedding: Embedding,
+        limit: int,
+    ) -> list[tuple[RawArtifact, float]]:
+        """Search raw artifact embeddings by exact cosine similarity."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.*, e.vector_json
+                FROM raw_artifact_embeddings e
+                JOIN raw_artifacts r ON r.id = e.artifact_id
+                """
+            ).fetchall()
+        scored = [
+            (
+                self._raw_artifact_from_row(row),
+                self._cosine_similarity(query_embedding.vector, self._vector_from_row(row)),
+            )
+            for row in rows
+        ]
+        return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
+
+    def get_raw_artifact(self, artifact_id: str) -> RawArtifact | None:
+        """Return one raw artifact by id, if it exists."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM raw_artifacts WHERE id = ?",
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._raw_artifact_from_row(row)
+
     def update(
         self,
         memory_id: str,
@@ -229,6 +506,65 @@ class SQLiteMemoryStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    def _delete_stale_raw_artifacts(
+        self,
+        connection: sqlite3.Connection,
+        artifacts: list[RawArtifact],
+        providers: list[str] | None,
+    ) -> None:
+        new_ids = {artifact.id for artifact in artifacts}
+        stale_ids = [
+            artifact_id
+            for artifact_id in self._raw_artifact_ids_for_providers(connection, providers)
+            if artifact_id not in new_ids
+        ]
+        if not stale_ids:
+            return
+        connection.executemany(
+            "DELETE FROM raw_artifact_embeddings WHERE artifact_id = ?",
+            [(artifact_id,) for artifact_id in stale_ids],
+        )
+        connection.executemany(
+            "DELETE FROM raw_artifacts WHERE id = ?",
+            [(artifact_id,) for artifact_id in stale_ids],
+        )
+        connection.executemany(
+            "DELETE FROM raw_artifact_fts WHERE id = ?",
+            [(artifact_id,) for artifact_id in stale_ids],
+        )
+
+    @staticmethod
+    def _raw_artifact_ids_for_providers(
+        connection: sqlite3.Connection,
+        providers: list[str] | None,
+    ) -> list[str]:
+        if providers is None:
+            rows = connection.execute("SELECT id FROM raw_artifacts").fetchall()
+            return [row["id"] for row in rows]
+        artifact_ids: list[str] = []
+        for provider in providers:
+            rows = connection.execute(
+                "SELECT id FROM raw_artifacts WHERE provider = ?",
+                (provider,),
+            ).fetchall()
+            artifact_ids.extend(row["id"] for row in rows)
+        return artifact_ids
+
+    @staticmethod
+    def _missing_raw_artifact_ids(
+        connection: sqlite3.Connection,
+        embeddings: list[tuple[str, Embedding]],
+    ) -> list[str]:
+        missing: list[str] = []
+        for artifact_id, _embedding in embeddings:
+            row = connection.execute(
+                "SELECT 1 FROM raw_artifacts WHERE id = ?",
+                (artifact_id,),
+            ).fetchone()
+            if row is None:
+                missing.append(artifact_id)
+        return missing
+
     def _updated_memory(
         self,
         existing: Memory,
@@ -262,6 +598,13 @@ class SQLiteMemoryStore:
         return stripped
 
     @staticmethod
+    def _validate_raw_artifact(artifact: RawArtifact) -> None:
+        if artifact.content.strip():
+            return
+        msg = "Raw artifact content cannot be empty"
+        raise ValueError(msg)
+
+    @staticmethod
     def _memory_values(memory: Memory) -> tuple[str, str, str, str, float, int, int]:
         return (
             memory.id,
@@ -284,6 +627,35 @@ class SQLiteMemoryStore:
             importance=row_data["importance"],
             created_at=row_data["created_at"],
             updated_at=row_data["updated_at"],
+        )
+
+    @staticmethod
+    def _raw_artifact_values(
+        artifact: RawArtifact,
+    ) -> tuple[str, str, str, str, str, str, str | None, str]:
+        return (
+            artifact.id,
+            artifact.provider,
+            artifact.source_path,
+            artifact.source_conversation_id,
+            artifact.message_id,
+            artifact.role,
+            artifact.created_at,
+            artifact.content.strip(),
+        )
+
+    @staticmethod
+    def _raw_artifact_from_row(row: sqlite3.Row) -> RawArtifact:
+        row_data: dict[str, Any] = dict(row)
+        return RawArtifact(
+            id=row_data["id"],
+            provider=row_data["provider"],
+            source_path=row_data["source_path"],
+            source_conversation_id=row_data["source_conversation_id"],
+            message_id=row_data["message_id"],
+            role=row_data["role"],
+            created_at=row_data["created_at"],
+            content=row_data["content"],
         )
 
     @staticmethod
