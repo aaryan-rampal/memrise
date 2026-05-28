@@ -225,10 +225,13 @@ def test_search_auto_scope_includes_memory_and_raw_artifact_results(tmp_path: Pa
     assert exit_code == 0
     assert stderr == ""
     assert "memory\t" in stdout
-    assert "\tcodex\tsession-1\tmessage-1\tuser\t" in stdout
+    assert '"kind": "raw_match"' in stdout
+    assert '"provider": "codex"' in stdout
+    assert '"conversation_id": "session-1"' in stdout
+    assert '"message_id": "message-1"' in stdout
 
 
-def test_raw_search_prints_bounded_snippet_with_id_and_position(tmp_path: Path) -> None:
+def test_raw_search_prints_bounded_jsonl_snippet_with_id_and_position(tmp_path: Path) -> None:
     db_path = tmp_path / "memories.sqlite3"
     store = SQLiteMemoryStore(db_path)
     store.initialize()
@@ -251,12 +254,21 @@ def test_raw_search_prints_bounded_snippet_with_id_and_position(tmp_path: Path) 
 
     assert exit_code == 0
     assert stderr == ""
-    assert stdout.startswith("raw\traw-1\tcodex\tsession-1\tmessage-1\tuser\t")
-    assert "\tmatch=360:366\t" in stdout
-    assert "\twindow=" in stdout
-    assert "needle centered detail" in stdout
-    assert "alpha " * 30 not in stdout
-    assert "omega " * 30 not in stdout
+    result = json.loads(stdout)
+    assert result == {
+        "kind": "raw_match",
+        "id": "raw-1",
+        "provider": "codex",
+        "conversation_id": "session-1",
+        "message_id": "message-1",
+        "role": "user",
+        "match": {"start": 360, "end": 366, "term": "needle"},
+        "window": {"start": 280, "end": 446},
+        "snippet": (
+            "a alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha "
+            "needle centered detail omega omega omega omega omega omega omega omega omega omega ome"
+        ),
+    }
 
 
 def test_raw_show_requires_bounds_or_explicit_full_flag(tmp_path: Path) -> None:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
@@ -27,6 +29,16 @@ if TYPE_CHECKING:
 
     from memories.embedder import Embedder, HttpPost
     from memories.models import Memory
+
+
+@dataclass(frozen=True)
+class RawSnippet:
+    match_start: int
+    match_end: int
+    match_term: str
+    window_start: int
+    window_end: int
+    text: str
 
 
 def main(
@@ -451,16 +463,8 @@ def _print_raw_artifacts(
     stdout: TextIO,
 ) -> None:
     for artifact in artifacts:
-        match_start, match_end, window_start, window_end, snippet = _raw_artifact_snippet(
-            artifact.content,
-            query,
-        )
-        print(
-            f"raw\t{artifact.id}\t{artifact.provider}\t{artifact.source_conversation_id}\t"
-            f"{artifact.message_id}\t{artifact.role}\tmatch={match_start}:{match_end}\t"
-            f"window={window_start}:{window_end}\t{snippet}",
-            file=stdout,
-        )
+        snippet = _raw_artifact_snippet(artifact.content, query)
+        print(json.dumps(_raw_match_json(artifact, snippet)), file=stdout)
 
 
 def _print_scored_raw_artifacts(
@@ -468,33 +472,61 @@ def _print_scored_raw_artifacts(
     stdout: TextIO,
 ) -> None:
     for artifact, score in artifacts:
-        _, _, window_start, window_end, snippet = _raw_artifact_snippet(artifact.content, "")
+        snippet = _raw_artifact_snippet(artifact.content, "")
+        raw_match = _raw_match_json(artifact, snippet)
+        raw_match["score"] = round(score, 4)
         print(
-            f"raw\t{score:.4f}\t{artifact.id}\t{artifact.provider}\t"
-            f"{artifact.source_conversation_id}\t{artifact.message_id}\t{artifact.role}\t"
-            f"match=0:0\twindow={window_start}:{window_end}\t{snippet}",
+            json.dumps(raw_match),
             file=stdout,
         )
 
 
-def _raw_artifact_snippet(content: str, query: str) -> tuple[int, int, int, int, str]:
-    match_start, match_end = _first_query_match(content, query)
+def _raw_match_json(
+    artifact: RawArtifact,
+    snippet: RawSnippet,
+) -> dict[str, object]:
+    return {
+        "kind": "raw_match",
+        "id": artifact.id,
+        "provider": artifact.provider,
+        "conversation_id": artifact.source_conversation_id,
+        "message_id": artifact.message_id,
+        "role": artifact.role,
+        "match": {
+            "start": snippet.match_start,
+            "end": snippet.match_end,
+            "term": snippet.match_term,
+        },
+        "window": {"start": snippet.window_start, "end": snippet.window_end},
+        "snippet": snippet.text,
+    }
+
+
+def _raw_artifact_snippet(content: str, query: str) -> RawSnippet:
+    match_start, match_end, match_term = _first_query_match(content, query)
     midpoint = max(match_start, 0)
     window_start = max(0, midpoint - RAW_SNIPPET_CONTEXT_CHARS)
     window_end = min(len(content), max(match_end, midpoint) + RAW_SNIPPET_CONTEXT_CHARS)
     snippet = _one_line_text(content[window_start:window_end])
-    return max(match_start, 0), max(match_end, 0), window_start, window_end, snippet
+    return RawSnippet(
+        match_start=max(match_start, 0),
+        match_end=max(match_end, 0),
+        match_term=match_term,
+        window_start=window_start,
+        window_end=window_end,
+        text=snippet,
+    )
 
 
-def _first_query_match(content: str, query: str) -> tuple[int, int]:
+def _first_query_match(content: str, query: str) -> tuple[int, int, str]:
     lowered_content = content.lower()
-    matches: list[tuple[int, int]] = []
+    matches: list[tuple[int, int, str]] = []
     for term in _query_terms(query):
         start = lowered_content.find(term.lower())
         if start >= 0:
-            matches.append((start, start + len(term)))
+            matches.append((start, start + len(term), term))
     if not matches:
-        return 0, 0
+        return 0, 0, ""
     return min(matches, key=lambda match: match[0])
 
 

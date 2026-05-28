@@ -42,6 +42,21 @@ mem search "deployment notes" --scope raw
 mem search "deployment notes" --scope both
 ```
 
+Raw artifact search results are JSONL. Each line includes the raw artifact id,
+provider metadata, match bounds, snippet window bounds, and a bounded snippet.
+Use `raw show` with explicit bounds to inspect the source text:
+
+```bash
+mem search "deployment notes" --scope raw
+mem raw show <raw-id> --start 0 --end 500
+```
+
+Full raw artifact output requires an explicit boolean:
+
+```bash
+mem raw show <raw-id> --full true
+```
+
 Allowed sources:
 
 ```text
