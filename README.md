@@ -1,4 +1,4 @@
-# memories
+# memrise
 
 A small local memory daemon for agent workflows.
 
@@ -31,7 +31,7 @@ mem delete <id>
 Use a specific database file:
 
 ```bash
-mem --db ~/.local/share/memories/memories.sqlite3 add "A memory"
+mem --db ~/.local/share/memrise/memories.sqlite3 add "A memory"
 ```
 
 Search only curated memories, raw artifacts, or both:

@@ -1,5 +1,5 @@
 [project]
-name = "memories"
+name = "memrise"
 version = "0.1.0"
 description = "A small personal memory daemon for agent workflows."
 readme = "README.md"

@@ -1,9 +1,9 @@
 ---
-name: memories
+name: memrise
 description: Use when working in this repository on the local memory CLI, raw chat canonicalization, raw artifact indexing, or retrieval behavior.
 ---
 
-# Memories
+# Memrise
 
 ## Workflow
 
