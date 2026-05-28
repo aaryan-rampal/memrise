@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import cast
 
 from memories.raw_chats import (
     DEFAULT_RAW_CHAT_SOURCES,
@@ -152,3 +153,153 @@ def test_codex_tool_calls_do_not_preserve_arguments_or_results(tmp_path: Path) -
     serialized = json.dumps(conversation)
     assert "secret raw command" not in serialized
     assert "secret raw tool output" not in serialized
+
+
+def test_opencode_text_tool_transcripts_do_not_preserve_arguments_or_file_bodies(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw" / "chats"
+    output_dir = tmp_path / "canonical" / "chats"
+    session_dir = raw_dir / "opencode" / "session"
+    message_dir = raw_dir / "opencode" / "message" / "ses_1"
+    part_dir = raw_dir / "opencode" / "part" / "msg_1"
+    session_dir.mkdir(parents=True)
+    message_dir.mkdir(parents=True)
+    part_dir.mkdir(parents=True)
+    (session_dir / "ses_1.json").write_text(
+        json.dumps(
+            {
+                "id": "ses_1",
+                "title": "OpenCode leak",
+                "directory": "/workspace/project",
+                "time": {
+                    "created": "2026-05-28T01:00:00Z",
+                    "updated": "2026-05-28T01:01:00Z",
+                },
+            }
+        )
+    )
+    (message_dir / "msg_1.json").write_text(
+        json.dumps(
+            {
+                "id": "msg_1",
+                "role": "user",
+                "time": {"created": "2026-05-28T01:00:30Z"},
+            }
+        )
+    )
+    (part_dir / "prt_1.json").write_text(
+        json.dumps(
+            {
+                "id": "prt_1",
+                "type": "text",
+                "text": (
+                    "Read @ML_DESIGN.md. Implement the plan.\n"
+                    "Called the Read tool with the following input: "
+                    '{"filePath":"/secret/path/ML_DESIGN.md"}\n'
+                    "<file>\n"
+                    "00001| private file body\n"
+                    "00002| more private file body\n"
+                    "</file>"
+                ),
+            }
+        )
+    )
+
+    write_canonical_chats(raw_dir, output_dir, providers=["opencode"])
+
+    [conversation] = read_jsonl(output_dir / "opencode.jsonl")
+    serialized = json.dumps(conversation)
+    assert conversation["messages"] == [
+        {
+            "id": "msg_1",
+            "parent_id": None,
+            "role": "user",
+            "created_at": "2026-05-28T01:00:30Z",
+            "content": [
+                {"type": "text", "text": "Read @ML_DESIGN.md. Implement the plan."},
+                {"type": "tool_call", "name": "Read", "status": "called"},
+                {"type": "tool_result", "status": "completed"},
+            ],
+            "raw": {"provider_record_type": "message"},
+        }
+    ]
+    assert "/secret/path/ML_DESIGN.md" not in serialized
+    assert "private file body" not in serialized
+
+
+def test_opencode_standalone_text_file_blocks_become_tool_results(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw" / "chats"
+    output_dir = tmp_path / "canonical" / "chats"
+    session_dir = raw_dir / "opencode" / "session"
+    message_dir = raw_dir / "opencode" / "message" / "ses_1"
+    part_dir = raw_dir / "opencode" / "part" / "msg_1"
+    session_dir.mkdir(parents=True)
+    message_dir.mkdir(parents=True)
+    part_dir.mkdir(parents=True)
+    (session_dir / "ses_1.json").write_text(json.dumps({"id": "ses_1"}))
+    (message_dir / "msg_1.json").write_text(json.dumps({"id": "msg_1", "role": "user"}))
+    (part_dir / "prt_1.json").write_text(
+        json.dumps(
+            {
+                "id": "prt_1",
+                "type": "text",
+                "text": (
+                    "<file>\n00001| private standalone file body\n00002| more private body\n</file>"
+                ),
+            }
+        )
+    )
+
+    write_canonical_chats(raw_dir, output_dir, providers=["opencode"])
+
+    [conversation] = read_jsonl(output_dir / "opencode.jsonl")
+    serialized = json.dumps(conversation)
+    messages = cast("list[dict[str, object]]", conversation["messages"])
+    assert messages[0]["content"] == [{"type": "tool_result", "status": "completed"}]
+    assert "private standalone file body" not in serialized
+
+
+def test_opencode_structured_tool_parts_do_not_preserve_inputs_or_outputs(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw" / "chats"
+    output_dir = tmp_path / "canonical" / "chats"
+    session_dir = raw_dir / "opencode" / "session"
+    message_dir = raw_dir / "opencode" / "message" / "ses_1"
+    part_dir = raw_dir / "opencode" / "part" / "msg_1"
+    session_dir.mkdir(parents=True)
+    message_dir.mkdir(parents=True)
+    part_dir.mkdir(parents=True)
+    (session_dir / "ses_1.json").write_text(json.dumps({"id": "ses_1"}))
+    (message_dir / "msg_1.json").write_text(json.dumps({"id": "msg_1", "role": "assistant"}))
+    (part_dir / "prt_1.json").write_text(
+        json.dumps(
+            {
+                "id": "prt_1",
+                "type": "tool",
+                "tool": "read",
+                "state": {
+                    "input": {"filePath": "/secret/path/app.py"},
+                    "output": (
+                        "<file>\n"
+                        "00001| private structured output\n"
+                        "00002| more private output\n"
+                        "</file>"
+                    ),
+                },
+            }
+        )
+    )
+
+    write_canonical_chats(raw_dir, output_dir, providers=["opencode"])
+
+    [conversation] = read_jsonl(output_dir / "opencode.jsonl")
+    serialized = json.dumps(conversation)
+    messages = cast("list[dict[str, object]]", conversation["messages"])
+    assert messages[0]["content"] == [
+        {"type": "tool_call", "name": "read", "status": "called"},
+        {"type": "tool_result", "status": "completed"},
+    ]
+    assert "/secret/path/app.py" not in serialized
+    assert "private structured output" not in serialized

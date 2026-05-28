@@ -462,10 +462,78 @@ def _opencode_part_content(part: JsonObject) -> ContentItems:
     part_type = str(part.get("type", ""))
     text = _optional_str(part.get("text"))
     if part_type == "text" and text:
-        return [{"type": "text", "text": text}]
+        return _opencode_text_content(text)
     if "tool" in part_type:
-        return [{"type": "tool_call", "name": _optional_str(part.get("tool")), "status": "called"}]
+        return _opencode_tool_content(part)
     return []
+
+
+def _opencode_tool_content(part: JsonObject) -> ContentItems:
+    content: ContentItems = [
+        {"type": "tool_call", "name": _optional_str(part.get("tool")), "status": "called"}
+    ]
+    state = part.get("state")
+    if isinstance(state, dict) and (
+        state.get("output") is not None or state.get("status") == "completed"
+    ):
+        content.append({"type": "tool_result", "status": "completed"})
+    return content
+
+
+def _opencode_text_content(text: str) -> ContentItems:
+    content: ContentItems = []
+    text_lines: list[str] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() == "<file>":
+            _append_text_content(content, text_lines)
+            index = _skip_opencode_file_block(lines, index)
+            content.append({"type": "tool_result", "status": "completed"})
+            continue
+        tool_name = _opencode_tool_call_name(line)
+        if tool_name is None:
+            text_lines.append(line)
+            index += 1
+            continue
+        _append_text_content(content, text_lines)
+        content.append({"type": "tool_call", "name": tool_name, "status": "called"})
+        index += 1
+        if index < len(lines) and lines[index].strip() == "<file>":
+            index = _skip_opencode_file_block(lines, index)
+            content.append({"type": "tool_result", "status": "completed"})
+    _append_text_content(content, text_lines)
+    return content
+
+
+def _append_text_content(content: ContentItems, lines: list[str]) -> None:
+    text = "\n".join(lines).strip()
+    lines.clear()
+    if text:
+        content.append({"type": "text", "text": text})
+
+
+def _opencode_tool_call_name(line: str) -> str | None:
+    prefix = "Called the "
+    suffix = " tool with the following input:"
+    stripped = line.strip()
+    if not stripped.startswith(prefix):
+        return None
+    suffix_index = stripped.find(suffix, len(prefix))
+    if suffix_index == -1:
+        return None
+    name = stripped[len(prefix) : suffix_index].strip()
+    return name or "unknown"
+
+
+def _skip_opencode_file_block(lines: list[str], start_index: int) -> int:
+    index = start_index + 1
+    while index < len(lines):
+        if lines[index].strip() == "</file>":
+            return index + 1
+        index += 1
+    return index
 
 
 def _attachment_content(attachment: JsonObject) -> JsonObject:
