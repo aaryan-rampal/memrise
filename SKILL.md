@@ -1,50 +1,67 @@
 ---
 name: memrise
-description: Use when working in this repository on the local memory CLI, raw chat canonicalization, raw artifact indexing, or retrieval behavior.
+description: Use when extracting, searching, importing, rebuilding, or inspecting memories through the local mem CLI.
 ---
 
-# Memrise
+# Memrise CLI
 
-## Workflow
+## Purpose
 
-1. Treat `data/` as generated private state. Do not commit raw exports,
-   canonical chat JSONL, symlinks, or SQLite files containing private data.
-2. Keep curated memories and raw artifacts separate. Curated memories are
-   self-contained facts/preferences; raw artifacts are canonical chat messages.
-3. Do not use `~/.claude/transcripts` as a canonical Claude Code source. Use
-   `~/.claude/projects`.
-4. Preserve tool-call privacy. Canonical chat output may say a tool call or tool
-   result occurred, but must not store raw arguments, command output, or tool
-   result text.
-5. Embedding CLI paths are temporarily disabled. Do not add ingestion or search
-   code that calls embedding providers unless the product decision changes.
+Use this skill when the task is to work with Aaryan's local memory CLI as a
+consumer: search memories, inspect raw chat evidence, rebuild the local index,
+or import curated memories.
 
-## Commands
+Do not treat this as repo-development guidance. If changing the codebase, follow
+the repo's `AGENTS.md` and project tooling instead.
 
-Use the project environment:
+## Operating Rules
 
-```bash
-PYTHONPATH=src .venv/bin/python -m memories.cli --no-help search "query"
-```
+- Treat this directory as READ-ONLY.
+- **ONLY** use the CLI. DO NOT RUN SCRIPTS OR MANUALLY ACCESS SQLITE.
+- Treat `data/` and `memories.sqlite3` as private generated state.
+- Do not use embedding commands; embedding-based paths are disabled.
+- If raw output is too large, use snippets or bounded `raw show` ranges instead
+  of dumping full artifacts.
 
-Run verification before claiming completion:
+## Command Form
+
+Run commands from `/Users/aaryanrampal/personal/memories`:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m ruff check .
-PYTHONPATH=src .venv/bin/python -m ruff format --check .
-PYTHONPATH=src .venv/bin/python -m ty check
-PYTHONPATH=src .venv/bin/python -m pytest -q
+PYTHONPATH=src .venv/bin/python -m memories.cli --no-help <command>
 ```
 
-## Raw Chat Pipeline
+Use `.venv`; do not use system Python. If `.venv` is missing, stop and ask
+Aaryan how to set up the environment.
+
+## Search
+
+Search curated memories:
 
 ```bash
-MEMORIES_CLAUDE_EXPORT_DIR=~/Downloads/claude-export \
-  PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw-chats link-sources
-PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw-chats canonicalize
-PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw-chats index
-PYTHONPATH=src .venv/bin/python -m memories.cli --no-help curated import
+PYTHONPATH=src .venv/bin/python -m memories.cli --no-help search "query" --scope memories
 ```
 
-If raw search output is too large, change presentation code to emit snippets
-rather than storing less provenance.
+Search raw chat artifacts:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m memories.cli --no-help search "query" --scope raw
+```
+
+Search both:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m memories.cli --no-help search "query" --scope both
+```
+
+Inspect a raw artifact with explicit bounds:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw show <raw-id> --start 0 --end 500
+```
+
+Full raw output requires an explicit boolean:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw show <raw-id> --full true
+```
