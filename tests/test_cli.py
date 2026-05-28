@@ -225,7 +225,114 @@ def test_search_auto_scope_includes_memory_and_raw_artifact_results(tmp_path: Pa
     assert exit_code == 0
     assert stderr == ""
     assert "memory\t" in stdout
-    assert "raw\tcodex" in stdout
+    assert "\tcodex\tsession-1\tmessage-1\tuser\t" in stdout
+
+
+def test_raw_search_prints_bounded_snippet_with_id_and_position(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+    store = SQLiteMemoryStore(db_path)
+    store.initialize()
+    store.upsert_raw_artifact(
+        RawArtifact(
+            id="raw-1",
+            provider="codex",
+            source_path="data/canonical/chats/codex.jsonl",
+            source_conversation_id="session-1",
+            message_id="message-1",
+            role="user",
+            created_at=None,
+            content="alpha " * 60 + "needle centered detail " + "omega " * 60,
+        )
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        ["--db", str(db_path), "--no-help", "search", "needle", "--scope", "raw"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert stdout.startswith("raw\traw-1\tcodex\tsession-1\tmessage-1\tuser\t")
+    assert "\tmatch=360:366\t" in stdout
+    assert "\twindow=" in stdout
+    assert "needle centered detail" in stdout
+    assert "alpha " * 30 not in stdout
+    assert "omega " * 30 not in stdout
+
+
+def test_raw_show_requires_bounds_or_explicit_full_flag(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+    store = SQLiteMemoryStore(db_path)
+    store.initialize()
+    store.upsert_raw_artifact(
+        RawArtifact(
+            id="raw-1",
+            provider="codex",
+            source_path="data/canonical/chats/codex.jsonl",
+            source_conversation_id="session-1",
+            message_id="message-1",
+            role="user",
+            created_at=None,
+            content="raw artifact content",
+        )
+    )
+
+    exit_code, stdout, stderr = run_cli(["--db", str(db_path), "--no-help", "raw", "show", "raw-1"])
+
+    assert exit_code == 1
+    assert stdout == ""
+    assert "pass --full true or provide --start and --end" in stderr
+
+
+def test_raw_show_prints_bounded_slice(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+    store = SQLiteMemoryStore(db_path)
+    store.initialize()
+    store.upsert_raw_artifact(
+        RawArtifact(
+            id="raw-1",
+            provider="codex",
+            source_path="data/canonical/chats/codex.jsonl",
+            source_conversation_id="session-1",
+            message_id="message-1",
+            role="user",
+            created_at=None,
+            content="0123456789abcdef",
+        )
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        ["--db", str(db_path), "--no-help", "raw", "show", "raw-1", "--start", "2", "--end", "8"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert stdout == "raw\traw-1\t2:8\t234567\n"
+
+
+def test_raw_show_prints_full_content_only_with_explicit_true(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+    store = SQLiteMemoryStore(db_path)
+    store.initialize()
+    store.upsert_raw_artifact(
+        RawArtifact(
+            id="raw-1",
+            provider="codex",
+            source_path="data/canonical/chats/codex.jsonl",
+            source_conversation_id="session-1",
+            message_id="message-1",
+            role="user",
+            created_at=None,
+            content="full raw artifact content",
+        )
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        ["--db", str(db_path), "--no-help", "raw", "show", "raw-1", "--full", "true"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert stdout == "raw\traw-1\t0:25\tfull raw artifact content\n"
 
 
 def test_raw_chats_index_logs_progress_to_stderr(tmp_path: Path) -> None:
