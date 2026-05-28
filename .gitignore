@@ -9,4 +9,6 @@ __pycache__/
 data/
 /docs
 /.worktrees
+!/.worktrees/post-checkout
 /.DS_Store
+.claude/worktrees/

@@ -409,27 +409,45 @@ class SQLiteMemoryStore:
                 )
             self._rebuild_raw_artifact_span_fts(connection)
 
-    def search_raw_artifacts(self, query: str, limit: int) -> list[RawArtifactSearchMatch]:
-        """Search raw chat artifacts using SQLite FTS5."""
+    def search_raw_artifacts(
+        self,
+        query: str,
+        limit: int,
+        offset: int = 0,
+    ) -> list[RawArtifactSearchMatch]:
+        """Search raw chat artifacts using SQLite FTS5 with pagination and reranking."""
         fts_query = self._fts_query(query)
         if not fts_query:
             return []
+        query_terms = set(
+            term.strip('"').lower() for term in query.split() if term.strip('"')
+        )
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT r.*, s.id AS span_id, s.artifact_id, s.span_index, s.message_index,
                   s.message_id, s.role, s.created_at AS span_created_at, s.start_offset,
-                  s.end_offset, s.content AS span_content
+                  s.end_offset, s.content AS span_content,
+                  bm25(raw_artifact_span_fts) AS bm25_score
                 FROM raw_artifact_span_fts f
                 JOIN raw_artifact_spans s ON s.id = f.span_id
                 JOIN raw_artifacts r ON r.id = s.artifact_id
                 WHERE raw_artifact_span_fts MATCH ?
-                ORDER BY bm25(raw_artifact_span_fts), s.span_index
-                LIMIT ?
+                ORDER BY bm25(raw_artifact_span_fts), s.span_index, r.id
                 """,
-                (fts_query, limit),
+                (fts_query,),
             ).fetchall()
-        return [self._raw_artifact_search_match_from_row(row) for row in rows]
+        if not rows:
+            return []
+        bm25_scores = [row["bm25_score"] for row in rows]
+        bm25_min, bm25_max = min(bm25_scores), max(bm25_scores)
+        matches = [self._raw_artifact_search_match_from_row(row) for row in rows]
+        scored = [
+            self._scored_raw_match(match, query_terms, bm25, bm25_min, bm25_max)
+            for match, bm25 in zip(matches, bm25_scores, strict=True)
+        ]
+        scored.sort(key=lambda item: item.score, reverse=True)
+        return scored[offset : offset + limit]
 
     def raw_artifact_count(self) -> int:
         """Return the number of indexed raw artifacts."""
@@ -955,3 +973,28 @@ class SQLiteMemoryStore:
             left_value * right_value for left_value, right_value in zip(left, right, strict=True)
         )
         return dot_product / (left_norm * right_norm)
+
+    @staticmethod
+    def _scored_raw_match(
+        match: RawArtifactSearchMatch,
+        query_terms: set[str],
+        bm25: float,
+        bm25_min: float,
+        bm25_max: float,
+    ) -> RawArtifactSearchMatch:
+        """Rerank using normalized BM25 and term density."""
+        # BM25 is negative (lower = better); normalize to [0, 1] where 1 is best
+        bm25_range = bm25_max - bm25_min
+        bm25_norm = (bm25_max - bm25) / bm25_range if bm25_range != 0.0 else 1.0
+        # Term density: matched query terms per 100 chars — rewards concentrated matches
+        span_content = match.span.content.lower()
+        span_len = max(len(span_content), 1)
+        matched_terms = sum(1 for term in query_terms if term in span_content)
+        density = (matched_terms / len(query_terms) * 100) / span_len if query_terms else 0.0
+        density_norm = min(density, 1.0)
+        score = 0.7 * bm25_norm + 0.3 * density_norm
+        return RawArtifactSearchMatch(
+            artifact=match.artifact,
+            span=match.span,
+            score=round(score, 4),
+        )

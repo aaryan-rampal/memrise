@@ -115,6 +115,7 @@ def _parser() -> argparse.ArgumentParser:
     search = subparsers.add_parser("search")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=8)
+    search.add_argument("--offset", type=int, default=0)
     search.add_argument(
         "--scope",
         choices=["auto", "memories", "raw", "both"],
@@ -479,10 +480,14 @@ def _print_search(
         _print_memories(service.search(args.query, args.limit), stdout)
         return
     if scope == "raw":
-        _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), args.query, stdout)
+        _print_raw_artifacts(
+            store.search_raw_artifacts(args.query, args.limit, args.offset), args.query, stdout
+        )
         return
     _print_memory_hits(service.search(args.query, args.limit), stdout)
-    _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), args.query, stdout)
+    _print_raw_artifacts(
+        store.search_raw_artifacts(args.query, args.limit, args.offset), args.query, stdout
+    )
 
 
 def _print_semantic_search(
@@ -565,7 +570,9 @@ def _print_raw_artifacts(
 ) -> None:
     for match in artifacts:
         snippet = _raw_search_match_snippet(match, query)
-        print(json.dumps(_raw_match_json(match, snippet)), file=stdout)
+        match_json = _raw_match_json(match, snippet)
+        match_json["score"] = round(match.score, 4)
+        print(json.dumps(match_json), file=stdout)
 
 
 def _print_scored_raw_artifacts(

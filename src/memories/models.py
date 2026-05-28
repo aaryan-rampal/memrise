@@ -128,3 +128,4 @@ class RawArtifactSearchMatch:
 
     artifact: RawArtifact
     span: RawArtifactSpan
+    score: float = 0.0

@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+
+# Symlink data directory in worktrees for testing convenience
+MAIN_REPO=$(git rev-parse --show-toplevel)
+DATA_DIR="$MAIN_REPO/data"
+if [[ -d "$DATA_DIR" ]]; then
+  ln -sf "$DATA_DIR" data 2>/dev/null || true
+fi

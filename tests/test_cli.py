@@ -413,6 +413,7 @@ def test_raw_search_prints_bounded_jsonl_snippet_with_id_and_position(tmp_path: 
             "a alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha "
             "needle centered detail omega omega omega omega omega omega omega omega omega omega ome"
         ),
+        "score": 0.8807,
     }
 
 
