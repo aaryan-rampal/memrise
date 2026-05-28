@@ -8,6 +8,10 @@
     - `mem raw-chats index --embed`
   - Required check: confirm OpenRouter API key/model wiring and rate-limit behavior in one run across both curated memories and raw artifacts.
 
+- [ ] Generate curated memory seeds from real curated sources
+  - Current: `curated import` loads `data/curated/memories.jsonl`, but the pipeline does not create that JSONL; the current seed was bridged from an old SQLite backup.
+  - Next step: add a generation stage that reads approved curated sources, such as Claude/Codex memory summaries, writes `data/curated/memories.jsonl`, and keeps synthesized memory generation separate from raw chat indexing.
+
 - [ ] Investigate a co-occurrence index for raw chat retrieval
   - Current: raw chat search uses FTS over span content only (`search_raw_artifacts` in `memories/sqlite_store.py`) and no co-occurrence structure is persisted.
   - Next step: evaluate whether precomputed co-occurrence (term pairs, phrase spans, or artifact/message co-occurrence edges) improves recall for multi-term queries and noisy natural-language terms.
@@ -26,6 +30,7 @@
 
 - [ ] Current-state check to remember
   - Embeddings: implemented in code paths, currently disabled in CLI dispatch and blocked in user-facing commands.
+  - Curated seed generation: not present.
   - Co-occurrence index: not present.
   - Raw-chat incremental indexing: not present.
   - Raw-search pagination: not present.
