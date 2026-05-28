@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from memories.embedder import Embedding
-from memories.models import RawArtifact
+from memories.models import RawArtifact, RawArtifactSpan
 from memories.raw_artifacts import RawArtifactIndexOptions, index_canonical_chats
 from memories.sqlite_store import SQLiteMemoryStore
 
@@ -36,7 +36,38 @@ class BatchRecordingEmbedder:
         ]
 
 
-def test_index_canonical_chats_stores_sanitized_raw_artifacts(tmp_path: Path) -> None:
+def make_raw_artifact(content: str, artifact_id: str = "raw-1") -> RawArtifact:
+    return RawArtifact(
+        id=artifact_id,
+        provider="codex",
+        source_path="data/canonical/chats/codex.jsonl",
+        source_conversation_id=artifact_id,
+        created_at=None,
+        updated_at=None,
+        title=None,
+        workspace=None,
+        content=content,
+    )
+
+
+def make_raw_span(content: str, artifact_id: str = "raw-1") -> RawArtifactSpan:
+    return RawArtifactSpan(
+        id=f"{artifact_id}-span-1",
+        artifact_id=artifact_id,
+        span_index=0,
+        message_index=0,
+        message_id="message-1",
+        role="user",
+        created_at=None,
+        start_offset=0,
+        end_offset=len(content),
+        content=content,
+    )
+
+
+def test_index_canonical_chats_stores_conversations_with_searchable_spans(
+    tmp_path: Path,
+) -> None:
     canonical_dir = tmp_path / "canonical" / "chats"
     canonical_dir.mkdir(parents=True)
     (canonical_dir / "codex.jsonl").write_text(
@@ -45,11 +76,21 @@ def test_index_canonical_chats_stores_sanitized_raw_artifacts(tmp_path: Path) ->
                 "provider": "codex",
                 "source_path": "data/raw/chats/codex/rollout.jsonl",
                 "source_conversation_id": "session-1",
+                "title": "Searchable session",
+                "created_at": "2026-05-24T00:00:00Z",
+                "updated_at": "2026-05-24T00:10:00Z",
+                "workspace": "/workspace/project",
                 "messages": [
                     {
-                        "id": "call-1",
-                        "role": "tool",
-                        "created_at": "2026-05-24T00:00:00Z",
+                        "id": "message-1",
+                        "role": "user",
+                        "created_at": "2026-05-24T00:01:00Z",
+                        "content": [{"type": "text", "text": "first request"}],
+                    },
+                    {
+                        "id": "message-2",
+                        "role": "assistant",
+                        "created_at": "2026-05-24T00:02:00Z",
                         "content": [
                             {
                                 "type": "tool_call",
@@ -57,7 +98,7 @@ def test_index_canonical_chats_stores_sanitized_raw_artifacts(tmp_path: Path) ->
                                 "status": "called",
                             }
                         ],
-                    }
+                    },
                 ],
             }
         )
@@ -75,8 +116,53 @@ def test_index_canonical_chats_stores_sanitized_raw_artifacts(tmp_path: Path) ->
     results = store.search_raw_artifacts("exec_command", limit=5)
     assert count == 1
     assert len(results) == 1
-    assert results[0].provider == "codex"
-    assert results[0].content == "tool call: exec_command called"
+    assert store.raw_artifact_count() == 1
+    assert results[0].artifact.provider == "codex"
+    assert results[0].artifact.source_conversation_id == "session-1"
+    assert results[0].artifact.content == (
+        "user: first request\n\nassistant: tool call: exec_command called"
+    )
+    assert results[0].span.message_id == "message-2"
+    assert results[0].span.role == "assistant"
+    assert results[0].span.start_offset == 21
+    assert results[0].span.content == "assistant: tool call: exec_command called"
+
+
+def test_index_canonical_chats_splits_large_messages_into_searchable_spans(
+    tmp_path: Path,
+) -> None:
+    canonical_dir = tmp_path / "canonical" / "chats"
+    canonical_dir.mkdir(parents=True)
+    long_text = "early context " + ("filler " * 900) + "late-needle final context"
+    (canonical_dir / "codex.jsonl").write_text(
+        json.dumps(
+            {
+                "provider": "codex",
+                "source_path": "data/raw/chats/codex/rollout.jsonl",
+                "source_conversation_id": "session-1",
+                "messages": [
+                    {
+                        "id": "message-1",
+                        "role": "user",
+                        "created_at": "2026-05-24T00:01:00Z",
+                        "content": [{"type": "text", "text": long_text}],
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+    store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
+    store.initialize()
+
+    index_canonical_chats(store, canonical_dir, RawArtifactIndexOptions(providers=["codex"]))
+
+    [match] = store.search_raw_artifacts("late-needle", limit=5)
+    assert match.artifact.content == f"user: {long_text}"
+    assert 0 < match.span.start_offset < match.span.end_offset
+    assert match.span.end_offset <= len(match.artifact.content)
+    assert len(match.span.content) < len(match.artifact.content)
+    assert "late-needle" in match.span.content
 
 
 def test_index_canonical_chats_embeds_each_raw_artifact(tmp_path: Path) -> None:
@@ -109,11 +195,11 @@ def test_index_canonical_chats_embeds_each_raw_artifact(tmp_path: Path) -> None:
         canonical_dir,
         RawArtifactIndexOptions(providers=["claude-code"], embedder=embedder),
     )
-    [artifact] = store.search_raw_artifacts("embed", limit=5)
+    [match] = store.search_raw_artifacts("embed", limit=5)
 
     assert count == 1
-    assert embedder.inputs == ["raw text to embed"]
-    assert store.get_raw_artifact_embedding(artifact.id) == Embedding(
+    assert embedder.inputs == ["user: raw text to embed"]
+    assert store.get_raw_artifact_embedding(match.artifact.id) == Embedding(
         provider="fake",
         model="tiny",
         vector=[0.1, 0.2],
@@ -144,16 +230,8 @@ def test_index_canonical_chats_replaces_partial_raw_artifact_index(tmp_path: Pat
     store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
     store.initialize()
     store.upsert_raw_artifact(
-        RawArtifact(
-            id="stale",
-            provider="codex",
-            source_path="old",
-            source_conversation_id="old",
-            message_id="old",
-            role="user",
-            created_at=None,
-            content="stale interrupted content",
-        )
+        make_raw_artifact("stale interrupted content", artifact_id="stale"),
+        [make_raw_span("stale interrupted content", artifact_id="stale")],
     )
 
     count = index_canonical_chats(
@@ -235,7 +313,7 @@ def test_index_canonical_chats_skips_existing_embeddings_and_logs_progress(
     index_canonical_chats(store, canonical_dir, RawArtifactIndexOptions(providers=["codex"]))
     [existing] = store.search_raw_artifacts("already", limit=5)
     store.save_raw_artifact_embedding(
-        existing.id,
+        existing.artifact.id,
         Embedding(provider="fake", model="fake/batch", vector=[9.0]),
     )
     embedder = BatchRecordingEmbedder()
@@ -251,9 +329,8 @@ def test_index_canonical_chats_skips_existing_embeddings_and_logs_progress(
         ),
     )
 
-    assert count == 2
-    assert embedder.batches == [["needs embedding"]]
-    assert store.raw_artifact_embedding_count() == 2
+    assert count == 1
+    assert embedder.batches == []
+    assert store.raw_artifact_embedding_count() == 1
     assert any("raw-embedding-skip\t1" in line for line in logs)
-    assert any("raw-embedding-batch\t1\t1\t1" in line for line in logs)
-    assert any("raw-embedding-complete\t2\t1\t1" in line for line in logs)
+    assert any("raw-embedding-complete\t1\t1\t0" in line for line in logs)

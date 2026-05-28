@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 from memories.embedder import Embedding
-from memories.models import AddMemory, RawArtifact
+from memories.models import AddMemory, RawArtifact, RawArtifactSpan
 from memories.service import MemoryService
 from memories.sqlite_store import SQLiteMemoryStore
 
@@ -25,6 +25,35 @@ def make_service(db_path: Path) -> MemoryService:
     store = SQLiteMemoryStore(db_path)
     store.initialize()
     return MemoryService(store)
+
+
+def make_raw_artifact(content: str, artifact_id: str = "raw-1") -> RawArtifact:
+    return RawArtifact(
+        id=artifact_id,
+        provider="codex",
+        source_path="data/canonical/chats/codex.jsonl",
+        source_conversation_id=artifact_id,
+        created_at=None,
+        updated_at=None,
+        title=None,
+        workspace=None,
+        content=content,
+    )
+
+
+def make_raw_span(content: str, artifact_id: str = "raw-1") -> RawArtifactSpan:
+    return RawArtifactSpan(
+        id=f"{artifact_id}-span-1",
+        artifact_id=artifact_id,
+        span_index=0,
+        message_index=0,
+        message_id="message-1",
+        role="user",
+        created_at=None,
+        start_offset=0,
+        end_offset=len(content),
+        content=content,
+    )
 
 
 def test_add_memory_persists_validated_record_with_unix_timestamps(tmp_path: Path) -> None:
@@ -138,17 +167,36 @@ def test_raw_artifact_search_uses_separate_fts_index(tmp_path: Path) -> None:
             provider="codex",
             source_path="data/canonical/chats/codex.jsonl",
             source_conversation_id="session-1",
-            message_id="message-1",
-            role="user",
             created_at="2026-05-24T00:00:00Z",
-            content="Raw transcript mentions canonical artifacts.",
-        )
+            updated_at="2026-05-24T00:10:00Z",
+            title="Recovery chat",
+            workspace="/workspace/project",
+            content="user: hello\nassistant: Raw transcript mentions canonical artifacts.",
+        ),
+        [
+            RawArtifactSpan(
+                id="span-1",
+                artifact_id="raw-1",
+                span_index=0,
+                message_index=1,
+                message_id="message-1",
+                role="assistant",
+                created_at="2026-05-24T00:01:00Z",
+                start_offset=12,
+                end_offset=62,
+                content="assistant: Raw transcript mentions canonical artifacts.",
+            )
+        ],
     )
 
     raw_results = store.search_raw_artifacts("canonical artifacts", limit=5)
     memory_results = store.search("canonical artifacts", limit=5)
 
-    assert [artifact.id for artifact in raw_results] == ["raw-1"]
+    assert [match.artifact.id for match in raw_results] == ["raw-1"]
+    assert [match.span.id for match in raw_results] == ["span-1"]
+    assert raw_results[0].span.start_offset == 12
+    assert raw_results[0].span.message_id == "message-1"
+    assert raw_results[0].span.role == "assistant"
     assert memory_results == []
 
 
@@ -156,48 +204,32 @@ def test_raw_artifact_search_matches_any_meaningful_query_term(tmp_path: Path) -
     store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
     store.initialize()
     store.upsert_raw_artifact(
-        RawArtifact(
-            id="raw-1",
-            provider="codex",
-            source_path="data/canonical/chats/codex.jsonl",
-            source_conversation_id="session-1",
-            message_id="message-1",
-            role="user",
-            created_at=None,
-            content="Career goals around systems and startup engineering.",
-        )
+        make_raw_artifact("Career goals around systems and startup engineering."),
+        [make_raw_span("Career goals around systems and startup engineering.")],
     )
 
     results = store.search_raw_artifacts("career goals AI ML new grad hackathon", limit=5)
 
-    assert [artifact.id for artifact in results] == ["raw-1"]
+    assert [match.artifact.id for match in results] == ["raw-1"]
 
 
 def test_raw_artifact_semantic_search_ranks_by_embedding(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
     store.initialize()
-    first = RawArtifact(
-        id="raw-1",
-        provider="codex",
-        source_path="data/canonical/chats/codex.jsonl",
-        source_conversation_id="session-1",
-        message_id="message-1",
-        role="user",
-        created_at=None,
-        content="Raw chat about git recovery",
-    )
+    first = make_raw_artifact("Raw chat about git recovery", artifact_id="raw-1")
     second = RawArtifact(
         id="raw-2",
         provider="claude-code",
         source_path="data/canonical/chats/claude-code.jsonl",
         source_conversation_id="session-2",
-        message_id="message-2",
-        role="assistant",
         created_at=None,
+        updated_at=None,
+        title=None,
+        workspace=None,
         content="Raw chat about playlist automation",
     )
-    store.upsert_raw_artifact(first)
-    store.upsert_raw_artifact(second)
+    store.upsert_raw_artifact(first, [make_raw_span(first.content, artifact_id=first.id)])
+    store.upsert_raw_artifact(second, [make_raw_span(second.content, artifact_id=second.id)])
     store.save_raw_artifact_embedding(
         first.id,
         Embedding(provider="fake", model="tiny", vector=[1.0, 0.0]),
@@ -219,17 +251,8 @@ def test_raw_artifact_semantic_search_ranks_by_embedding(tmp_path: Path) -> None
 def test_raw_artifact_embedding_model_lookup_is_case_insensitive(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
     store.initialize()
-    artifact = RawArtifact(
-        id="raw-1",
-        provider="codex",
-        source_path="data/canonical/chats/codex.jsonl",
-        source_conversation_id="session-1",
-        message_id="message-1",
-        role="user",
-        created_at=None,
-        content="Raw chat content",
-    )
-    store.upsert_raw_artifact(artifact)
+    artifact = make_raw_artifact("Raw chat content")
+    store.upsert_raw_artifact(artifact, [make_raw_span("Raw chat content")])
     store.save_raw_artifact_embedding(
         artifact.id,
         Embedding(provider="openrouter", model="Qwen/Qwen3-Embedding-8B", vector=[1.0]),
@@ -244,32 +267,19 @@ def test_replace_raw_artifacts_rebuilds_fts_without_per_artifact_delete(
     store = TracedSQLiteMemoryStore(tmp_path / "memories.sqlite3")
     store.initialize()
     store.upsert_raw_artifact(
-        RawArtifact(
-            id="raw-1",
-            provider="codex",
-            source_path="old",
-            source_conversation_id="session-1",
-            message_id="message-1",
-            role="user",
-            created_at=None,
-            content="old searchable text",
-        )
+        make_raw_artifact("old searchable text", artifact_id="raw-1"),
+        [make_raw_span("old searchable text", artifact_id="raw-1")],
     )
-    replacement = RawArtifact(
-        id="raw-2",
-        provider="codex",
-        source_path="new",
-        source_conversation_id="session-2",
-        message_id="message-2",
-        role="user",
-        created_at=None,
-        content="new searchable text",
-    )
+    replacement = make_raw_artifact("new searchable text", artifact_id="raw-2")
 
-    store.replace_raw_artifacts([replacement], providers=None)
+    store.replace_raw_artifacts(
+        [replacement],
+        [make_raw_span("new searchable text", artifact_id="raw-2")],
+        providers=None,
+    )
 
     assert store.search_raw_artifacts("old", limit=5) == []
-    assert [artifact.id for artifact in store.search_raw_artifacts("new", limit=5)] == ["raw-2"]
+    assert [match.artifact.id for match in store.search_raw_artifacts("new", limit=5)] == ["raw-2"]
     traced = "\n".join(store.trace)
-    assert "DELETE FROM raw_artifact_fts WHERE id = ?" not in traced
-    assert "INSERT INTO raw_artifact_fts (id, content)" in traced
+    assert "DELETE FROM raw_artifact_span_fts WHERE span_id = ?" not in traced
+    assert "INSERT INTO raw_artifact_span_fts (span_id, content)" in traced

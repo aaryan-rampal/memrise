@@ -12,7 +12,7 @@ from loguru import logger
 
 from memories.embedder import OpenRouterEmbedder
 from memories.logging import configure_logging
-from memories.models import AddMemory, RawArtifact
+from memories.models import AddMemory, RawArtifact, RawArtifactSearchMatch, RawArtifactSpan
 from memories.raw_artifacts import RawArtifactIndexOptions, index_canonical_chats
 from memories.raw_chats import ensure_raw_chat_links, write_canonical_chats
 from memories.service import MemoryService
@@ -458,13 +458,13 @@ def _print_scored_memory_hits(memories: Sequence[tuple[Memory, float]], stdout: 
 
 
 def _print_raw_artifacts(
-    artifacts: Sequence[RawArtifact],
+    artifacts: Sequence[RawArtifactSearchMatch],
     query: str,
     stdout: TextIO,
 ) -> None:
-    for artifact in artifacts:
-        snippet = _raw_artifact_snippet(artifact.content, query)
-        print(json.dumps(_raw_match_json(artifact, snippet)), file=stdout)
+    for match in artifacts:
+        snippet = _raw_search_match_snippet(match, query)
+        print(json.dumps(_raw_match_json(match, snippet)), file=stdout)
 
 
 def _print_scored_raw_artifacts(
@@ -473,7 +473,7 @@ def _print_scored_raw_artifacts(
 ) -> None:
     for artifact, score in artifacts:
         snippet = _raw_artifact_snippet(artifact.content, "")
-        raw_match = _raw_match_json(artifact, snippet)
+        raw_match = _raw_match_json(_raw_artifact_full_match(artifact), snippet)
         raw_match["score"] = round(score, 4)
         print(
             json.dumps(raw_match),
@@ -482,16 +482,21 @@ def _print_scored_raw_artifacts(
 
 
 def _raw_match_json(
-    artifact: RawArtifact,
+    match: RawArtifactSearchMatch,
     snippet: RawSnippet,
 ) -> dict[str, object]:
+    artifact = match.artifact
+    span = match.span
     return {
         "kind": "raw_match",
-        "id": artifact.id,
+        "artifact_id": artifact.id,
         "provider": artifact.provider,
         "conversation_id": artifact.source_conversation_id,
-        "message_id": artifact.message_id,
-        "role": artifact.role,
+        "message": {
+            "id": span.message_id,
+            "role": span.role,
+            "index": span.message_index,
+        },
         "match": {
             "start": snippet.match_start,
             "end": snippet.match_end,
@@ -502,8 +507,51 @@ def _raw_match_json(
     }
 
 
+def _raw_artifact_full_match(artifact: RawArtifact) -> RawArtifactSearchMatch:
+    return RawArtifactSearchMatch(
+        artifact=artifact,
+        span=RawArtifactSpan(
+            id=f"{artifact.id}:full",
+            artifact_id=artifact.id,
+            span_index=0,
+            message_index=0,
+            message_id="",
+            role="unknown",
+            created_at=artifact.created_at,
+            start_offset=0,
+            end_offset=len(artifact.content),
+            content=artifact.content,
+        ),
+    )
+
+
+def _raw_search_match_snippet(match: RawArtifactSearchMatch, query: str) -> RawSnippet:
+    relative_start, relative_end, match_term = _first_query_match(match.span.content, query)
+    if match_term:
+        match_start = match.span.start_offset + relative_start
+        match_end = match.span.start_offset + relative_end
+    else:
+        match_start = match.span.start_offset
+        match_end = match.span.start_offset
+    return _raw_snippet_at_bounds(
+        match.artifact.content,
+        match_start,
+        match_end,
+        match_term,
+    )
+
+
 def _raw_artifact_snippet(content: str, query: str) -> RawSnippet:
     match_start, match_end, match_term = _first_query_match(content, query)
+    return _raw_snippet_at_bounds(content, match_start, match_end, match_term)
+
+
+def _raw_snippet_at_bounds(
+    content: str,
+    match_start: int,
+    match_end: int,
+    match_term: str,
+) -> RawSnippet:
     midpoint = max(match_start, 0)
     window_start = max(0, midpoint - RAW_SNIPPET_CONTEXT_CHARS)
     window_end = min(len(content), max(match_end, midpoint) + RAW_SNIPPET_CONTEXT_CHARS)
