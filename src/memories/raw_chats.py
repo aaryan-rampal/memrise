@@ -325,11 +325,19 @@ def _message(record: MessageRecord) -> JsonObject:
 
 def _claude_message_content(message: JsonObject) -> ContentItems:
     content: ContentItems = []
+    seen_text: set[str] = set()
     text = _optional_str(message.get("text"))
     if text:
         content.append({"type": "text", "text": text})
+        seen_text.add(text)
     for item in _list_of_objects(message.get("content")):
-        content.extend(_provider_content_item(item))
+        for content_item in _provider_content_item(item):
+            item_text = _optional_str(content_item.get("text"))
+            if content_item.get("type") == "text" and item_text in seen_text:
+                continue
+            if content_item.get("type") == "text" and item_text:
+                seen_text.add(item_text)
+            content.append(content_item)
     for attachment in _list_of_objects(message.get("attachments")):
         content.append(_attachment_content(attachment))
     for file_item in _list_of_objects(message.get("files")):

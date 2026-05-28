@@ -99,7 +99,32 @@ class RawArtifact:
     provider: str
     source_path: str
     source_conversation_id: str
+    created_at: str | None
+    updated_at: str | None
+    title: str | None
+    workspace: str | None
+    content: str
+
+
+@dataclass(frozen=True)
+class RawArtifactSpan:
+    """Searchable span inside a raw artifact."""
+
+    id: str
+    artifact_id: str
+    span_index: int
+    message_index: int
     message_id: str
     role: str
     created_at: str | None
+    start_offset: int
+    end_offset: int
     content: str
+
+
+@dataclass(frozen=True)
+class RawArtifactSearchMatch:
+    """Raw search result joining a span to its parent artifact."""
+
+    artifact: RawArtifact
+    span: RawArtifactSpan

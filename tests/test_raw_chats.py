@@ -89,6 +89,53 @@ def test_claude_export_canonicalization_ignores_conversation_summary(tmp_path: P
     ]
 
 
+def test_claude_export_canonicalization_deduplicates_text_and_content_text(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw" / "chats"
+    output_dir = tmp_path / "canonical" / "chats"
+    claude_source = raw_dir / "claude-export"
+    claude_source.mkdir(parents=True)
+    (claude_source / "conversations.json").write_text(
+        json.dumps(
+            [
+                {
+                    "uuid": "conversation-1",
+                    "name": "Raw source",
+                    "created_at": "2026-05-24T01:00:00Z",
+                    "updated_at": "2026-05-24T01:10:00Z",
+                    "chat_messages": [
+                        {
+                            "uuid": "message-1",
+                            "parent_message_uuid": None,
+                            "sender": "human",
+                            "created_at": "2026-05-24T01:01:00Z",
+                            "text": "raw human text",
+                            "content": [{"type": "text", "text": "raw human text"}],
+                            "attachments": [],
+                            "files": [],
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+
+    write_canonical_chats(raw_dir, output_dir, providers=["claude-export"])
+
+    [conversation] = read_jsonl(output_dir / "claude-export.jsonl")
+    assert conversation["messages"] == [
+        {
+            "id": "message-1",
+            "parent_id": None,
+            "role": "user",
+            "created_at": "2026-05-24T01:01:00Z",
+            "content": [{"type": "text", "text": "raw human text"}],
+            "raw": {"provider_record_type": "chat_message"},
+        }
+    ]
+
+
 def test_codex_tool_calls_do_not_preserve_arguments_or_results(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw" / "chats"
     output_dir = tmp_path / "canonical" / "chats"

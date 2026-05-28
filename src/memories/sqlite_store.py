@@ -9,7 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from memories.embedder import Embedding
-from memories.models import AddMemory, Memory, MemoryType, RawArtifact, Source, validate_importance
+from memories.models import (
+    AddMemory,
+    Memory,
+    MemoryType,
+    RawArtifact,
+    RawArtifactSearchMatch,
+    RawArtifactSpan,
+    Source,
+    validate_importance,
+)
 
 
 class SQLiteMemoryStore:
@@ -53,14 +62,29 @@ class SQLiteMemoryStore:
                     provider TEXT NOT NULL,
                     source_path TEXT NOT NULL,
                     source_conversation_id TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
                     created_at TEXT,
+                    updated_at TEXT,
+                    title TEXT,
+                    workspace TEXT,
                     content TEXT NOT NULL
                 );
 
-                CREATE VIRTUAL TABLE IF NOT EXISTS raw_artifact_fts
-                USING fts5(id UNINDEXED, content);
+                CREATE TABLE IF NOT EXISTS raw_artifact_spans (
+                    id TEXT PRIMARY KEY,
+                    artifact_id TEXT NOT NULL,
+                    span_index INTEGER NOT NULL,
+                    message_index INTEGER NOT NULL,
+                    message_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT,
+                    start_offset INTEGER NOT NULL,
+                    end_offset INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    FOREIGN KEY (artifact_id) REFERENCES raw_artifacts(id) ON DELETE CASCADE
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS raw_artifact_span_fts
+                USING fts5(span_id UNINDEXED, content);
 
                 CREATE TABLE IF NOT EXISTS raw_artifact_embeddings (
                     artifact_id TEXT PRIMARY KEY,
@@ -73,6 +97,8 @@ class SQLiteMemoryStore:
                 );
                 """
             )
+            self._recreate_raw_schema_if_legacy(connection)
+            self._ensure_raw_schema(connection)
 
     def add(self, memory: AddMemory) -> Memory:
         """Persist a memory and index it for FTS search."""
@@ -202,22 +228,43 @@ class SQLiteMemoryStore:
         ]
         return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
 
-    def upsert_raw_artifact(self, artifact: RawArtifact) -> None:
+    def upsert_raw_artifact(
+        self,
+        artifact: RawArtifact,
+        spans: list[RawArtifactSpan],
+    ) -> None:
         """Persist a raw chat artifact and index it for FTS search."""
-        self.upsert_raw_artifacts([artifact])
+        self.upsert_raw_artifacts([artifact], spans)
 
-    def upsert_raw_artifacts(self, artifacts: list[RawArtifact]) -> None:
+    def upsert_raw_artifacts(
+        self,
+        artifacts: list[RawArtifact],
+        spans: list[RawArtifactSpan],
+    ) -> None:
         """Persist raw chat artifacts and index them for FTS search."""
         if not artifacts:
             return
         for artifact in artifacts:
             self._validate_raw_artifact(artifact)
+        for span in spans:
+            self._validate_raw_artifact_span(span)
         values = [self._raw_artifact_values(artifact) for artifact in artifacts]
-        fts_values = [(artifact.id, artifact.content) for artifact in artifacts]
+        span_values = [self._raw_artifact_span_values(span) for span in spans]
+        fts_values = [(span.id, span.content) for span in spans]
+        artifact_ids = [(artifact.id,) for artifact in artifacts]
         with self._connect() as connection:
             connection.executemany(
-                "DELETE FROM raw_artifact_fts WHERE id = ?",
-                [(artifact.id,) for artifact in artifacts],
+                """
+                DELETE FROM raw_artifact_span_fts
+                WHERE span_id IN (
+                  SELECT id FROM raw_artifact_spans WHERE artifact_id = ?
+                )
+                """,
+                artifact_ids,
+            )
+            connection.executemany(
+                "DELETE FROM raw_artifact_spans WHERE artifact_id = ?",
+                artifact_ids,
             )
             connection.executemany(
                 """
@@ -227,34 +274,60 @@ class SQLiteMemoryStore:
                     provider,
                     source_path,
                     source_conversation_id,
-                    message_id,
-                    role,
                     created_at,
+                    updated_at,
+                    title,
+                    workspace,
                     content
                   )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   provider = excluded.provider,
                   source_path = excluded.source_path,
                   source_conversation_id = excluded.source_conversation_id,
-                  message_id = excluded.message_id,
-                  role = excluded.role,
                   created_at = excluded.created_at,
+                  updated_at = excluded.updated_at,
+                  title = excluded.title,
+                  workspace = excluded.workspace,
                   content = excluded.content
                 """,
                 values,
             )
             connection.executemany(
-                "INSERT INTO raw_artifact_fts (id, content) VALUES (?, ?)",
+                """
+                INSERT INTO raw_artifact_spans
+                  (
+                    id,
+                    artifact_id,
+                    span_index,
+                    message_index,
+                    message_id,
+                    role,
+                    created_at,
+                    start_offset,
+                    end_offset,
+                    content
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                span_values,
+            )
+            connection.executemany(
+                "INSERT INTO raw_artifact_span_fts (span_id, content) VALUES (?, ?)",
                 fts_values,
             )
 
     def replace_raw_artifacts(
-        self, artifacts: list[RawArtifact], providers: list[str] | None
+        self,
+        artifacts: list[RawArtifact],
+        spans: list[RawArtifactSpan],
+        providers: list[str] | None,
     ) -> None:
         """Replace indexed raw artifacts for the selected providers."""
         for artifact in artifacts:
             self._validate_raw_artifact(artifact)
+        for span in spans:
+            self._validate_raw_artifact_span(span)
         with self._connect() as connection:
             self._delete_stale_raw_artifacts(connection, artifacts, providers)
             if artifacts:
@@ -266,26 +339,49 @@ class SQLiteMemoryStore:
                         provider,
                         source_path,
                         source_conversation_id,
-                        message_id,
-                        role,
                         created_at,
+                        updated_at,
+                        title,
+                        workspace,
                         content
                       )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       provider = excluded.provider,
                       source_path = excluded.source_path,
                       source_conversation_id = excluded.source_conversation_id,
-                      message_id = excluded.message_id,
-                      role = excluded.role,
                       created_at = excluded.created_at,
+                      updated_at = excluded.updated_at,
+                      title = excluded.title,
+                      workspace = excluded.workspace,
                       content = excluded.content
                     """,
                     [self._raw_artifact_values(artifact) for artifact in artifacts],
                 )
-            self._rebuild_raw_artifact_fts(connection)
+            connection.execute("DELETE FROM raw_artifact_spans")
+            if spans:
+                connection.executemany(
+                    """
+                    INSERT INTO raw_artifact_spans
+                      (
+                        id,
+                        artifact_id,
+                        span_index,
+                        message_index,
+                        message_id,
+                        role,
+                        created_at,
+                        start_offset,
+                        end_offset,
+                        content
+                      )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [self._raw_artifact_span_values(span) for span in spans],
+                )
+            self._rebuild_raw_artifact_span_fts(connection)
 
-    def search_raw_artifacts(self, query: str, limit: int) -> list[RawArtifact]:
+    def search_raw_artifacts(self, query: str, limit: int) -> list[RawArtifactSearchMatch]:
         """Search raw chat artifacts using SQLite FTS5."""
         fts_query = self._fts_query(query)
         if not fts_query:
@@ -293,16 +389,19 @@ class SQLiteMemoryStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT r.*
-                FROM raw_artifact_fts f
-                JOIN raw_artifacts r ON r.id = f.id
-                WHERE raw_artifact_fts MATCH ?
-                ORDER BY bm25(raw_artifact_fts)
+                SELECT r.*, s.id AS span_id, s.artifact_id, s.span_index, s.message_index,
+                  s.message_id, s.role, s.created_at AS span_created_at, s.start_offset,
+                  s.end_offset, s.content AS span_content
+                FROM raw_artifact_span_fts f
+                JOIN raw_artifact_spans s ON s.id = f.span_id
+                JOIN raw_artifacts r ON r.id = s.artifact_id
+                WHERE raw_artifact_span_fts MATCH ?
+                ORDER BY bm25(raw_artifact_span_fts), s.span_index
                 LIMIT ?
                 """,
                 (fts_query, limit),
             ).fetchall()
-        return [self._raw_artifact_from_row(row) for row in rows]
+        return [self._raw_artifact_search_match_from_row(row) for row in rows]
 
     def raw_artifact_count(self) -> int:
         """Return the number of indexed raw artifacts."""
@@ -498,6 +597,78 @@ class SQLiteMemoryStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @staticmethod
+    def _recreate_raw_schema_if_legacy(connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(raw_artifacts)").fetchall()
+        columns = {row["name"] for row in rows}
+        expected = {
+            "id",
+            "provider",
+            "source_path",
+            "source_conversation_id",
+            "created_at",
+            "updated_at",
+            "title",
+            "workspace",
+            "content",
+        }
+        if expected.issubset(columns):
+            return
+        connection.executescript(
+            """
+            DROP TABLE IF EXISTS raw_artifact_fts;
+            DROP TABLE IF EXISTS raw_artifact_span_fts;
+            DROP TABLE IF EXISTS raw_artifact_spans;
+            DROP TABLE IF EXISTS raw_artifact_embeddings;
+            DROP TABLE IF EXISTS raw_artifacts;
+            """
+        )
+
+    @staticmethod
+    def _ensure_raw_schema(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS raw_artifacts (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_conversation_id TEXT NOT NULL,
+                created_at TEXT,
+                updated_at TEXT,
+                title TEXT,
+                workspace TEXT,
+                content TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS raw_artifact_spans (
+                id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                span_index INTEGER NOT NULL,
+                message_index INTEGER NOT NULL,
+                message_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TEXT,
+                start_offset INTEGER NOT NULL,
+                end_offset INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                FOREIGN KEY (artifact_id) REFERENCES raw_artifacts(id) ON DELETE CASCADE
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS raw_artifact_span_fts
+            USING fts5(span_id UNINDEXED, content);
+
+            CREATE TABLE IF NOT EXISTS raw_artifact_embeddings (
+                artifact_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                vector_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (artifact_id) REFERENCES raw_artifacts(id) ON DELETE CASCADE
+            );
+            """
+        )
+
     def _delete_stale_raw_artifacts(
         self,
         connection: sqlite3.Connection,
@@ -513,6 +684,14 @@ class SQLiteMemoryStore:
         if not stale_ids:
             return
         connection.executemany(
+            "DELETE FROM raw_artifact_span_fts WHERE span_id = ?",
+            [(span_id,) for span_id in self._raw_span_ids_for_artifact_ids(connection, stale_ids)],
+        )
+        connection.executemany(
+            "DELETE FROM raw_artifact_spans WHERE artifact_id = ?",
+            [(artifact_id,) for artifact_id in stale_ids],
+        )
+        connection.executemany(
             "DELETE FROM raw_artifact_embeddings WHERE artifact_id = ?",
             [(artifact_id,) for artifact_id in stale_ids],
         )
@@ -522,14 +701,28 @@ class SQLiteMemoryStore:
         )
 
     @staticmethod
-    def _rebuild_raw_artifact_fts(connection: sqlite3.Connection) -> None:
-        connection.execute("DELETE FROM raw_artifact_fts")
+    def _rebuild_raw_artifact_span_fts(connection: sqlite3.Connection) -> None:
+        connection.execute("DELETE FROM raw_artifact_span_fts")
         connection.execute(
             """
-            INSERT INTO raw_artifact_fts (id, content)
-            SELECT id, content FROM raw_artifacts
+            INSERT INTO raw_artifact_span_fts (span_id, content)
+            SELECT id, content FROM raw_artifact_spans
             """
         )
+
+    @staticmethod
+    def _raw_span_ids_for_artifact_ids(
+        connection: sqlite3.Connection,
+        artifact_ids: list[str],
+    ) -> list[str]:
+        span_ids: list[str] = []
+        for artifact_id in artifact_ids:
+            rows = connection.execute(
+                "SELECT id FROM raw_artifact_spans WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchall()
+            span_ids.extend(row["id"] for row in rows)
+        return span_ids
 
     @staticmethod
     def _raw_artifact_ids_for_providers(
@@ -603,6 +796,18 @@ class SQLiteMemoryStore:
         raise ValueError(msg)
 
     @staticmethod
+    def _validate_raw_artifact_span(span: RawArtifactSpan) -> None:
+        if not span.content.strip():
+            msg = "Raw artifact span content cannot be empty"
+            raise ValueError(msg)
+        if span.start_offset < 0:
+            msg = "Raw artifact span start_offset cannot be negative"
+            raise ValueError(msg)
+        if span.end_offset <= span.start_offset:
+            msg = "Raw artifact span end_offset must be greater than start_offset"
+            raise ValueError(msg)
+
+    @staticmethod
     def _memory_values(memory: Memory) -> tuple[str, str, str, str, float, int, int]:
         return (
             memory.id,
@@ -630,16 +835,34 @@ class SQLiteMemoryStore:
     @staticmethod
     def _raw_artifact_values(
         artifact: RawArtifact,
-    ) -> tuple[str, str, str, str, str, str, str | None, str]:
+    ) -> tuple[str, str, str, str, str | None, str | None, str | None, str | None, str]:
         return (
             artifact.id,
             artifact.provider,
             artifact.source_path,
             artifact.source_conversation_id,
-            artifact.message_id,
-            artifact.role,
             artifact.created_at,
+            artifact.updated_at,
+            artifact.title,
+            artifact.workspace,
             artifact.content.strip(),
+        )
+
+    @staticmethod
+    def _raw_artifact_span_values(
+        span: RawArtifactSpan,
+    ) -> tuple[str, str, int, int, str, str, str | None, int, int, str]:
+        return (
+            span.id,
+            span.artifact_id,
+            span.span_index,
+            span.message_index,
+            span.message_id,
+            span.role,
+            span.created_at,
+            span.start_offset,
+            span.end_offset,
+            span.content.strip(),
         )
 
     @staticmethod
@@ -650,10 +873,33 @@ class SQLiteMemoryStore:
             provider=row_data["provider"],
             source_path=row_data["source_path"],
             source_conversation_id=row_data["source_conversation_id"],
+            created_at=row_data["created_at"],
+            updated_at=row_data["updated_at"],
+            title=row_data["title"],
+            workspace=row_data["workspace"],
+            content=row_data["content"],
+        )
+
+    @staticmethod
+    def _raw_artifact_span_from_row(row: sqlite3.Row) -> RawArtifactSpan:
+        row_data: dict[str, Any] = dict(row)
+        return RawArtifactSpan(
+            id=row_data["span_id"],
+            artifact_id=row_data["artifact_id"],
+            span_index=row_data["span_index"],
+            message_index=row_data["message_index"],
             message_id=row_data["message_id"],
             role=row_data["role"],
-            created_at=row_data["created_at"],
-            content=row_data["content"],
+            created_at=row_data["span_created_at"],
+            start_offset=row_data["start_offset"],
+            end_offset=row_data["end_offset"],
+            content=row_data["span_content"],
+        )
+
+    def _raw_artifact_search_match_from_row(self, row: sqlite3.Row) -> RawArtifactSearchMatch:
+        return RawArtifactSearchMatch(
+            artifact=self._raw_artifact_from_row(row),
+            span=self._raw_artifact_span_from_row(row),
         )
 
     @staticmethod

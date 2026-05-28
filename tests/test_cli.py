@@ -4,7 +4,7 @@ from pathlib import Path
 
 from memories.cli import main
 from memories.embedder import Embedding, HttpPost
-from memories.models import AddMemory, RawArtifact
+from memories.models import AddMemory, RawArtifact, RawArtifactSpan
 from memories.sqlite_store import SQLiteMemoryStore
 
 
@@ -18,6 +18,35 @@ def run_cli(
     stderr = io.StringIO()
     exit_code = main(args, stdout=stdout, stderr=stderr, environ=environ, post_json=post_json)
     return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+def make_raw_artifact(content: str, artifact_id: str = "raw-1") -> RawArtifact:
+    return RawArtifact(
+        id=artifact_id,
+        provider="codex",
+        source_path="data/canonical/chats/codex.jsonl",
+        source_conversation_id="session-1",
+        created_at=None,
+        updated_at=None,
+        title=None,
+        workspace=None,
+        content=content,
+    )
+
+
+def make_raw_span(content: str, artifact_id: str = "raw-1") -> RawArtifactSpan:
+    return RawArtifactSpan(
+        id=f"{artifact_id}-span-1",
+        artifact_id=artifact_id,
+        span_index=0,
+        message_index=0,
+        message_id="message-1",
+        role="user",
+        created_at=None,
+        start_offset=0,
+        end_offset=len(content),
+        content=content,
+    )
 
 
 def test_add_prints_agent_guidance_by_default(tmp_path: Path) -> None:
@@ -228,24 +257,40 @@ def test_search_auto_scope_includes_memory_and_raw_artifact_results(tmp_path: Pa
     assert '"kind": "raw_match"' in stdout
     assert '"provider": "codex"' in stdout
     assert '"conversation_id": "session-1"' in stdout
-    assert '"message_id": "message-1"' in stdout
+    assert '"message": {"id": "message-1", "role": "user", "index": 0}' in stdout
 
 
 def test_raw_search_prints_bounded_jsonl_snippet_with_id_and_position(tmp_path: Path) -> None:
     db_path = tmp_path / "memories.sqlite3"
     store = SQLiteMemoryStore(db_path)
     store.initialize()
+    content = "alpha " * 60 + "needle centered detail " + "omega " * 60
     store.upsert_raw_artifact(
         RawArtifact(
             id="raw-1",
             provider="codex",
             source_path="data/canonical/chats/codex.jsonl",
             source_conversation_id="session-1",
-            message_id="message-1",
-            role="user",
             created_at=None,
-            content="alpha " * 60 + "needle centered detail " + "omega " * 60,
-        )
+            updated_at=None,
+            title=None,
+            workspace=None,
+            content=content,
+        ),
+        [
+            RawArtifactSpan(
+                id="span-1",
+                artifact_id="raw-1",
+                span_index=0,
+                message_index=3,
+                message_id="message-1",
+                role="user",
+                created_at=None,
+                start_offset=280,
+                end_offset=446,
+                content=content[280:446],
+            )
+        ],
     )
 
     exit_code, stdout, stderr = run_cli(
@@ -257,11 +302,10 @@ def test_raw_search_prints_bounded_jsonl_snippet_with_id_and_position(tmp_path: 
     result = json.loads(stdout)
     assert result == {
         "kind": "raw_match",
-        "id": "raw-1",
+        "artifact_id": "raw-1",
         "provider": "codex",
         "conversation_id": "session-1",
-        "message_id": "message-1",
-        "role": "user",
+        "message": {"id": "message-1", "role": "user", "index": 3},
         "match": {"start": 360, "end": 366, "term": "needle"},
         "window": {"start": 280, "end": 446},
         "snippet": (
@@ -276,16 +320,8 @@ def test_raw_show_requires_bounds_or_explicit_full_flag(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(db_path)
     store.initialize()
     store.upsert_raw_artifact(
-        RawArtifact(
-            id="raw-1",
-            provider="codex",
-            source_path="data/canonical/chats/codex.jsonl",
-            source_conversation_id="session-1",
-            message_id="message-1",
-            role="user",
-            created_at=None,
-            content="raw artifact content",
-        )
+        make_raw_artifact("raw artifact content"),
+        [make_raw_span("raw artifact content")],
     )
 
     exit_code, stdout, stderr = run_cli(["--db", str(db_path), "--no-help", "raw", "show", "raw-1"])
@@ -300,16 +336,8 @@ def test_raw_show_prints_bounded_slice(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(db_path)
     store.initialize()
     store.upsert_raw_artifact(
-        RawArtifact(
-            id="raw-1",
-            provider="codex",
-            source_path="data/canonical/chats/codex.jsonl",
-            source_conversation_id="session-1",
-            message_id="message-1",
-            role="user",
-            created_at=None,
-            content="0123456789abcdef",
-        )
+        make_raw_artifact("0123456789abcdef"),
+        [make_raw_span("0123456789abcdef")],
     )
 
     exit_code, stdout, stderr = run_cli(
@@ -326,16 +354,8 @@ def test_raw_show_prints_full_content_only_with_explicit_true(tmp_path: Path) ->
     store = SQLiteMemoryStore(db_path)
     store.initialize()
     store.upsert_raw_artifact(
-        RawArtifact(
-            id="raw-1",
-            provider="codex",
-            source_path="data/canonical/chats/codex.jsonl",
-            source_conversation_id="session-1",
-            message_id="message-1",
-            role="user",
-            created_at=None,
-            content="full raw artifact content",
-        )
+        make_raw_artifact("full raw artifact content"),
+        [make_raw_span("full raw artifact content")],
     )
 
     exit_code, stdout, stderr = run_cli(
@@ -445,17 +465,8 @@ def test_embeddings_clear_removes_memory_and_raw_artifact_embeddings(tmp_path: P
     store = SQLiteMemoryStore(db_path)
     store.initialize()
     memory = store.add(AddMemory(content="memory with embedding"))
-    artifact = RawArtifact(
-        id="raw-1",
-        provider="codex",
-        source_path="data/canonical/chats/codex.jsonl",
-        source_conversation_id="session-1",
-        message_id="message-1",
-        role="user",
-        created_at=None,
-        content="raw artifact with embedding",
-    )
-    store.upsert_raw_artifact(artifact)
+    artifact = make_raw_artifact("raw artifact with embedding")
+    store.upsert_raw_artifact(artifact, [make_raw_span("raw artifact with embedding")])
     store.save_embedding(memory.id, Embedding(provider="fake", model="tiny", vector=[1.0]))
     store.save_raw_artifact_embedding(
         artifact.id,
