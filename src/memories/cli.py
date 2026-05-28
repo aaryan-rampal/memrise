@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
@@ -20,12 +22,23 @@ DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
 EMBEDDINGS_DISABLED_MESSAGE = (
     "embedding features are temporarily disabled; use lexical search while embeddings are reviewed"
 )
+RAW_SNIPPET_CONTEXT_CHARS = 80
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from memories.embedder import Embedder, HttpPost
     from memories.models import Memory
+
+
+@dataclass(frozen=True)
+class RawSnippet:
+    match_start: int
+    match_end: int
+    match_term: str
+    window_start: int
+    window_end: int
+    text: str
 
 
 def main(
@@ -154,6 +167,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     index.add_argument("--embed", action="store_true")
     index.add_argument("--rebuild-embeddings", action="store_true")
+
+    raw = subparsers.add_parser("raw")
+    raw_subparsers = raw.add_subparsers(dest="raw_command", required=True)
+
+    raw_show = raw_subparsers.add_parser("show")
+    raw_show.add_argument("id")
+    raw_show.add_argument("--start", type=int, default=None)
+    raw_show.add_argument("--end", type=int, default=None)
+    raw_show.add_argument("--full", choices=["true", "false"], default="false")
     return parser
 
 
@@ -215,6 +237,7 @@ def _print_guidance(args: argparse.Namespace, stdout: TextIO) -> None:
         "raw-chats": (
             "Links and canonicalizes raw chat exports. Use --no-help to hide this guidance."
         ),
+        "raw": "Reads indexed raw artifacts. Use --no-help to hide this guidance.",
     }
     print(guidance[args.command], file=stdout)
 
@@ -253,6 +276,40 @@ def _dispatch(
     elif args.command == "delete":
         deleted = service.delete_memory(args.id)
         print(f"deleted {args.id}" if deleted else f"missing {args.id}", file=stdout)
+    elif args.command == "raw":
+        _dispatch_raw(args, store, stdout)
+
+
+def _dispatch_raw(
+    args: argparse.Namespace,
+    store: SQLiteMemoryStore,
+    stdout: TextIO,
+) -> None:
+    if args.raw_command == "show":
+        artifact = store.get_raw_artifact(args.id)
+        if artifact is None:
+            msg = f"Raw artifact '{args.id}' does not exist"
+            raise ValueError(msg)
+        start, end = _raw_show_bounds(args, len(artifact.content))
+        print(f"raw\t{artifact.id}\t{start}:{end}\t{artifact.content[start:end]}", file=stdout)
+
+
+def _raw_show_bounds(args: argparse.Namespace, content_length: int) -> tuple[int, int]:
+    if args.full == "true":
+        return 0, content_length
+    if args.start is None or args.end is None:
+        msg = "raw show requires bounded output; pass --full true or provide --start and --end"
+        raise ValueError(msg)
+    if args.start < 0:
+        msg = "--start must be greater than or equal to 0"
+        raise ValueError(msg)
+    if args.end <= args.start:
+        msg = "--end must be greater than --start"
+        raise ValueError(msg)
+    if args.end > content_length:
+        msg = f"--end must be less than or equal to content length {content_length}"
+        raise ValueError(msg)
+    return args.start, args.end
 
 
 def _dispatch_raw_chats(
@@ -321,10 +378,10 @@ def _print_search(
         _print_memories(service.search(args.query, args.limit), stdout)
         return
     if scope == "raw":
-        _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), stdout)
+        _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), args.query, stdout)
         return
     _print_memory_hits(service.search(args.query, args.limit), stdout)
-    _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), stdout)
+    _print_raw_artifacts(store.search_raw_artifacts(args.query, args.limit), args.query, stdout)
 
 
 def _print_semantic_search(
@@ -400,13 +457,14 @@ def _print_scored_memory_hits(memories: Sequence[tuple[Memory, float]], stdout: 
         )
 
 
-def _print_raw_artifacts(artifacts: Sequence[RawArtifact], stdout: TextIO) -> None:
+def _print_raw_artifacts(
+    artifacts: Sequence[RawArtifact],
+    query: str,
+    stdout: TextIO,
+) -> None:
     for artifact in artifacts:
-        print(
-            f"raw\t{artifact.provider}\t{artifact.source_conversation_id}\t"
-            f"{artifact.message_id}\t{artifact.role}\t{artifact.content}",
-            file=stdout,
-        )
+        snippet = _raw_artifact_snippet(artifact.content, query)
+        print(json.dumps(_raw_match_json(artifact, snippet)), file=stdout)
 
 
 def _print_scored_raw_artifacts(
@@ -414,11 +472,70 @@ def _print_scored_raw_artifacts(
     stdout: TextIO,
 ) -> None:
     for artifact, score in artifacts:
+        snippet = _raw_artifact_snippet(artifact.content, "")
+        raw_match = _raw_match_json(artifact, snippet)
+        raw_match["score"] = round(score, 4)
         print(
-            f"raw\t{score:.4f}\t{artifact.provider}\t{artifact.source_conversation_id}\t"
-            f"{artifact.message_id}\t{artifact.role}\t{artifact.content}",
+            json.dumps(raw_match),
             file=stdout,
         )
+
+
+def _raw_match_json(
+    artifact: RawArtifact,
+    snippet: RawSnippet,
+) -> dict[str, object]:
+    return {
+        "kind": "raw_match",
+        "id": artifact.id,
+        "provider": artifact.provider,
+        "conversation_id": artifact.source_conversation_id,
+        "message_id": artifact.message_id,
+        "role": artifact.role,
+        "match": {
+            "start": snippet.match_start,
+            "end": snippet.match_end,
+            "term": snippet.match_term,
+        },
+        "window": {"start": snippet.window_start, "end": snippet.window_end},
+        "snippet": snippet.text,
+    }
+
+
+def _raw_artifact_snippet(content: str, query: str) -> RawSnippet:
+    match_start, match_end, match_term = _first_query_match(content, query)
+    midpoint = max(match_start, 0)
+    window_start = max(0, midpoint - RAW_SNIPPET_CONTEXT_CHARS)
+    window_end = min(len(content), max(match_end, midpoint) + RAW_SNIPPET_CONTEXT_CHARS)
+    snippet = _one_line_text(content[window_start:window_end])
+    return RawSnippet(
+        match_start=max(match_start, 0),
+        match_end=max(match_end, 0),
+        match_term=match_term,
+        window_start=window_start,
+        window_end=window_end,
+        text=snippet,
+    )
+
+
+def _first_query_match(content: str, query: str) -> tuple[int, int, str]:
+    lowered_content = content.lower()
+    matches: list[tuple[int, int, str]] = []
+    for term in _query_terms(query):
+        start = lowered_content.find(term.lower())
+        if start >= 0:
+            matches.append((start, start + len(term), term))
+    if not matches:
+        return 0, 0, ""
+    return min(matches, key=lambda match: match[0])
+
+
+def _query_terms(query: str) -> list[str]:
+    return [term.strip('"') for term in query.split() if term.strip('"')]
+
+
+def _one_line_text(text: str) -> str:
+    return " ".join(text.split())
 
 
 if __name__ == "__main__":

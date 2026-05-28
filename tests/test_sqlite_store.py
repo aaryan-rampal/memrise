@@ -152,6 +152,27 @@ def test_raw_artifact_search_uses_separate_fts_index(tmp_path: Path) -> None:
     assert memory_results == []
 
 
+def test_raw_artifact_search_matches_any_meaningful_query_term(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
+    store.initialize()
+    store.upsert_raw_artifact(
+        RawArtifact(
+            id="raw-1",
+            provider="codex",
+            source_path="data/canonical/chats/codex.jsonl",
+            source_conversation_id="session-1",
+            message_id="message-1",
+            role="user",
+            created_at=None,
+            content="Career goals around systems and startup engineering.",
+        )
+    )
+
+    results = store.search_raw_artifacts("career goals AI ML new grad hackathon", limit=5)
+
+    assert [artifact.id for artifact in results] == ["raw-1"]
+
+
 def test_raw_artifact_semantic_search_ranks_by_embedding(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(tmp_path / "memories.sqlite3")
     store.initialize()
