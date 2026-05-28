@@ -257,41 +257,33 @@ class SQLiteMemoryStore:
             self._validate_raw_artifact(artifact)
         with self._connect() as connection:
             self._delete_stale_raw_artifacts(connection, artifacts, providers)
-            if not artifacts:
-                return
-            connection.executemany(
-                "DELETE FROM raw_artifact_fts WHERE id = ?",
-                [(artifact.id,) for artifact in artifacts],
-            )
-            connection.executemany(
-                """
-                INSERT INTO raw_artifacts
-                  (
-                    id,
-                    provider,
-                    source_path,
-                    source_conversation_id,
-                    message_id,
-                    role,
-                    created_at,
-                    content
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  provider = excluded.provider,
-                  source_path = excluded.source_path,
-                  source_conversation_id = excluded.source_conversation_id,
-                  message_id = excluded.message_id,
-                  role = excluded.role,
-                  created_at = excluded.created_at,
-                  content = excluded.content
-                """,
-                [self._raw_artifact_values(artifact) for artifact in artifacts],
-            )
-            connection.executemany(
-                "INSERT INTO raw_artifact_fts (id, content) VALUES (?, ?)",
-                [(artifact.id, artifact.content) for artifact in artifacts],
-            )
+            if artifacts:
+                connection.executemany(
+                    """
+                    INSERT INTO raw_artifacts
+                      (
+                        id,
+                        provider,
+                        source_path,
+                        source_conversation_id,
+                        message_id,
+                        role,
+                        created_at,
+                        content
+                      )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      provider = excluded.provider,
+                      source_path = excluded.source_path,
+                      source_conversation_id = excluded.source_conversation_id,
+                      message_id = excluded.message_id,
+                      role = excluded.role,
+                      created_at = excluded.created_at,
+                      content = excluded.content
+                    """,
+                    [self._raw_artifact_values(artifact) for artifact in artifacts],
+                )
+            self._rebuild_raw_artifact_fts(connection)
 
     def search_raw_artifacts(self, query: str, limit: int) -> list[RawArtifact]:
         """Search raw chat artifacts using SQLite FTS5."""
@@ -528,9 +520,15 @@ class SQLiteMemoryStore:
             "DELETE FROM raw_artifacts WHERE id = ?",
             [(artifact_id,) for artifact_id in stale_ids],
         )
-        connection.executemany(
-            "DELETE FROM raw_artifact_fts WHERE id = ?",
-            [(artifact_id,) for artifact_id in stale_ids],
+
+    @staticmethod
+    def _rebuild_raw_artifact_fts(connection: sqlite3.Connection) -> None:
+        connection.execute("DELETE FROM raw_artifact_fts")
+        connection.execute(
+            """
+            INSERT INTO raw_artifact_fts (id, content)
+            SELECT id, content FROM raw_artifacts
+            """
         )
 
     @staticmethod

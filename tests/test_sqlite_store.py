@@ -1,9 +1,24 @@
+import sqlite3
 from pathlib import Path
 
 from memories.embedder import Embedding
 from memories.models import AddMemory, RawArtifact
 from memories.service import MemoryService
 from memories.sqlite_store import SQLiteMemoryStore
+
+
+class TracedSQLiteMemoryStore(SQLiteMemoryStore):
+    """SQLite store that records executed SQL for storage tests."""
+
+    def __init__(self, db_path: Path) -> None:
+        """Create a store and capture every executed SQL statement."""
+        super().__init__(db_path)
+        self.trace: list[str] = []
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = super()._connect()
+        connection.set_trace_callback(self.trace.append)
+        return connection
 
 
 def make_service(db_path: Path) -> MemoryService:
@@ -200,3 +215,40 @@ def test_raw_artifact_embedding_model_lookup_is_case_insensitive(tmp_path: Path)
     )
 
     assert store.raw_artifact_ids_with_embedding_model("qwen/qwen3-embedding-8b") == {"raw-1"}
+
+
+def test_replace_raw_artifacts_rebuilds_fts_without_per_artifact_delete(
+    tmp_path: Path,
+) -> None:
+    store = TracedSQLiteMemoryStore(tmp_path / "memories.sqlite3")
+    store.initialize()
+    store.upsert_raw_artifact(
+        RawArtifact(
+            id="raw-1",
+            provider="codex",
+            source_path="old",
+            source_conversation_id="session-1",
+            message_id="message-1",
+            role="user",
+            created_at=None,
+            content="old searchable text",
+        )
+    )
+    replacement = RawArtifact(
+        id="raw-2",
+        provider="codex",
+        source_path="new",
+        source_conversation_id="session-2",
+        message_id="message-2",
+        role="user",
+        created_at=None,
+        content="new searchable text",
+    )
+
+    store.replace_raw_artifacts([replacement], providers=None)
+
+    assert store.search_raw_artifacts("old", limit=5) == []
+    assert [artifact.id for artifact in store.search_raw_artifacts("new", limit=5)] == ["raw-2"]
+    traced = "\n".join(store.trace)
+    assert "DELETE FROM raw_artifact_fts WHERE id = ?" not in traced
+    assert "INSERT INTO raw_artifact_fts (id, content)" in traced

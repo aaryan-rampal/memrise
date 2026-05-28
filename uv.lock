@@ -21,9 +21,25 @@ wheels = [
 ]
 
 [[package]]
+name = "loguru"
+version = "0.7.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl", hash = "sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c", size = 61595, upload-time = "2024-12-06T11:20:54.538Z" },
+]
+
+[[package]]
 name = "memories"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "loguru" },
+]
 
 [package.optional-dependencies]
 dev = [
@@ -36,6 +52,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "loguru", specifier = "==0.7.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.0.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.14" },
     { name = "ty", marker = "extra == 'dev'", specifier = "==0.0.39" },
@@ -187,4 +204,13 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/6a/29/b6ae9f3f534ea064c543957582a5949bde8e870bc81e77bd7dea0348b7b0/uv_build-0.11.16-py3-none-win32.whl", hash = "sha256:42a7a8fe6d782f4d75f31c9f7e14264d434526241c62e6b1802b58873087019e", size = 1456972, upload-time = "2026-05-21T22:09:55.31Z" },
     { url = "https://files.pythonhosted.org/packages/dc/00/5daf6647e3a52c83bbd1513a420c0090783d6c8240108e05c906df8c2639/uv_build-0.11.16-py3-none-win_amd64.whl", hash = "sha256:64bce6641224abda3f2993155b559b398b62d22e1881f41d834875e68ee0165c", size = 1526565, upload-time = "2026-05-21T22:10:12.239Z" },
     { url = "https://files.pythonhosted.org/packages/26/39/dfc4e557708bb949408b38e3b9ef5b5576bbfe1e8f1ec6b5cc0f50b7e2ed/uv_build-0.11.16-py3-none-win_arm64.whl", hash = "sha256:ecd55416310c266d4626f52d8d85e0d03ddef08a136dae9eba4f520e2dbb4747", size = 1443100, upload-time = "2026-05-21T22:10:00.04Z" },
+]
+
+[[package]]
+name = "win32-setctime"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/8f/705086c9d734d3b663af0e9bb3d4de6578d08f46b1b101c2442fd9aecaa2/win32_setctime-1.2.0.tar.gz", hash = "sha256:ae1fdf948f5640aae05c511ade119313fb6a30d7eabe25fef9764dca5873c4c0", size = 4867, upload-time = "2024-12-07T15:28:28.314Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/07/c6fe3ad3e685340704d314d765b7912993bcb8dc198f0e7a89382d37974b/win32_setctime-1.2.0-py3-none-any.whl", hash = "sha256:95d644c4e708aba81dc3704a116d8cbc974d70b3bdb8be1d150e36be6e9d1390", size = 4083, upload-time = "2024-12-07T15:28:26.465Z" },
 ]

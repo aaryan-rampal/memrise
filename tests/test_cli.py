@@ -159,7 +159,8 @@ def test_raw_chats_canonicalize_writes_provider_jsonl(tmp_path: Path) -> None:
     )
 
     assert exit_code == 0
-    assert stderr == ""
+    assert "raw_chat_canonicalize_start" in stderr
+    assert "canonical_chat_provider_complete provider=codex conversations=1" in stderr
     assert "codex\t1" in stdout
     assert (output_dir / "codex.jsonl").exists()
 
@@ -225,6 +226,51 @@ def test_search_auto_scope_includes_memory_and_raw_artifact_results(tmp_path: Pa
     assert stderr == ""
     assert "memory\t" in stdout
     assert "raw\tcodex" in stdout
+
+
+def test_raw_chats_index_logs_progress_to_stderr(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+    canonical_dir = tmp_path / "canonical" / "chats"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "codex.jsonl").write_text(
+        json.dumps(
+            {
+                "provider": "codex",
+                "source_path": "data/raw/chats/codex/rollout.jsonl",
+                "source_conversation_id": "session-1",
+                "messages": [
+                    {
+                        "id": "message-1",
+                        "role": "user",
+                        "created_at": None,
+                        "content": [{"type": "text", "text": "logged raw artifact detail"}],
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "raw-chats",
+            "index",
+            "--canonical-dir",
+            str(canonical_dir),
+            "--provider",
+            "codex",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stdout == ""
+    assert "raw_artifact_index_start" in stderr
+    assert "raw_artifact_file_complete" in stderr
+    assert "raw_artifact_index_replace_complete artifacts=1" in stderr
+    assert "raw_chat_index_complete artifacts=1" in stderr
 
 
 def test_raw_chats_index_rejects_embedding_while_disabled(tmp_path: Path) -> None:

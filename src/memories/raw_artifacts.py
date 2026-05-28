@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from loguru import logger
+
 from memories.embedder import Embedder, Embedding
 from memories.models import RawArtifact
 from memories.sqlite_store import SQLiteMemoryStore
@@ -34,18 +36,24 @@ def index_canonical_chats(
 ) -> int:
     """Index canonical chat JSONL files as searchable raw artifacts."""
     options = options or RawArtifactIndexOptions()
-    artifacts = _deduplicate_artifacts(
-        [
-            artifact
-            for path in _canonical_paths(Path(canonical_dir), options.providers)
-            for conversation in _jsonl_objects(path)
-            for artifact in _conversation_artifacts(conversation)
-        ]
+    canonical_path = Path(canonical_dir)
+    paths = _canonical_paths(canonical_path, options.providers)
+    logger.info(
+        "raw_artifact_index_start canonical_dir={} providers={} files={}",
+        canonical_path,
+        options.providers or "all",
+        len(paths),
     )
+    artifacts = _deduplicate_artifacts(_artifacts_from_paths(paths))
+    logger.info("raw_artifact_index_loaded artifacts={}", len(artifacts))
     if options.reset:
+        logger.info("raw_artifact_index_replace_start providers={}", options.providers or "all")
         store.replace_raw_artifacts(artifacts, options.providers)
+        logger.info("raw_artifact_index_replace_complete artifacts={}", len(artifacts))
     else:
+        logger.info("raw_artifact_index_upsert_start artifacts={}", len(artifacts))
         store.upsert_raw_artifacts(artifacts)
+        logger.info("raw_artifact_index_upsert_complete artifacts={}", len(artifacts))
     _log(options.log, f"raw-artifacts\t{len(artifacts)}")
     if options.embedder is None:
         return len(artifacts)
@@ -70,6 +78,26 @@ def index_canonical_chats(
         _log(options.log, f"raw-embedding-progress\t{embedded}\t{len(pending)}")
     _log(options.log, f"raw-embedding-complete\t{len(artifacts)}\t{skipped}\t{embedded}")
     return len(artifacts)
+
+
+def _artifacts_from_paths(paths: list[Path]) -> list[RawArtifact]:
+    artifacts: list[RawArtifact] = []
+    for path in paths:
+        logger.info("raw_artifact_file_start path={}", path)
+        conversations = _jsonl_objects(path)
+        file_artifacts = [
+            artifact
+            for conversation in conversations
+            for artifact in _conversation_artifacts(conversation)
+        ]
+        artifacts.extend(file_artifacts)
+        logger.info(
+            "raw_artifact_file_complete path={} conversations={} artifacts={}",
+            path,
+            len(conversations),
+            len(file_artifacts),
+        )
+    return artifacts
 
 
 def _pending_embedding_artifacts(

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from loguru import logger
+
 JsonObject = dict[str, Any]
 ContentItems = list[JsonObject]
 
@@ -229,6 +231,7 @@ def ensure_raw_chat_links(
     created: dict[str, Path] = {}
     for provider, source in (sources or DEFAULT_RAW_CHAT_SOURCES).items():
         source_path = source.expanduser()
+        logger.info("raw_chat_source_check provider={} source={}", provider, source_path)
         if not source_path.exists():
             msg = f"Raw chat source for {provider} does not exist: {source_path}"
             raise FileNotFoundError(msg)
@@ -243,6 +246,7 @@ def ensure_raw_chat_links(
         else:
             link_path.symlink_to(source_path, target_is_directory=True)
         created[provider] = link_path
+        logger.info("raw_chat_source_linked provider={} link={}", provider, link_path)
     return created
 
 
@@ -259,6 +263,7 @@ def write_canonical_chats(
     selected = providers or list(_adapters())
     counts: dict[str, int] = {}
     for provider in selected:
+        logger.info("canonical_chat_provider_start provider={}", provider)
         adapter = _adapter(provider)
         conversations = adapter.conversations(raw_dir / provider)
         output_path = canonical_dir / f"{provider}.jsonl"
@@ -266,6 +271,12 @@ def write_canonical_chats(
             for conversation in conversations:
                 output.write(json.dumps(conversation, sort_keys=True) + "\n")
         counts[provider] = len(conversations)
+        logger.info(
+            "canonical_chat_provider_complete provider={} conversations={} output={}",
+            provider,
+            len(conversations),
+            output_path,
+        )
     return counts
 
 

@@ -6,7 +6,10 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
+from loguru import logger
+
 from memories.embedder import OpenRouterEmbedder
+from memories.logging import configure_logging
 from memories.models import AddMemory, RawArtifact
 from memories.raw_artifacts import RawArtifactIndexOptions, index_canonical_chats
 from memories.raw_chats import ensure_raw_chat_links, write_canonical_chats
@@ -36,6 +39,7 @@ def main(
     """Run the `mem` command-line interface."""
     parser = _parser()
     args = parser.parse_args(argv)
+    configure_logging(stderr, level=(environ or os.environ).get("MEMORIES_LOG_LEVEL", "INFO"))
     store = SQLiteMemoryStore(args.db)
     if args.command == "embeddings":
         try:
@@ -259,17 +263,30 @@ def _dispatch_raw_chats(
     post_json: HttpPost | None,
 ) -> None:
     if args.raw_chats_command == "link-sources":
+        logger.info("raw_chat_link_sources_start raw_dir={}", args.raw_dir)
         links = ensure_raw_chat_links(args.raw_dir)
         for provider, path in links.items():
+            logger.info("raw_chat_link provider={} path={}", provider, path)
             print(f"{provider}\t{path}", file=stdout)
+        logger.info("raw_chat_link_sources_complete count={}", len(links))
     elif args.raw_chats_command == "canonicalize":
+        logger.info(
+            "raw_chat_canonicalize_start raw_dir={} output_dir={} providers={}",
+            args.raw_dir,
+            args.output_dir,
+            args.providers or "all",
+        )
         counts = write_canonical_chats(
             args.raw_dir,
             args.output_dir,
             providers=args.providers,
         )
         for provider, count in counts.items():
+            logger.info(
+                "raw_chat_canonicalize_provider provider={} conversations={}", provider, count
+            )
             print(f"{provider}\t{count}", file=stdout)
+        logger.info("raw_chat_canonicalize_complete providers={}", len(counts))
     elif args.raw_chats_command == "index":
         store.initialize()
         if args.embed and args.embedding_model is None:
@@ -286,9 +303,9 @@ def _dispatch_raw_chats(
                 providers=args.providers,
                 embedder=embedder,
                 rebuild_embeddings=args.rebuild_embeddings,
-                log=lambda message: print(message, file=stdout),
             ),
         )
+        logger.info("raw_chat_index_complete artifacts={}", count)
         if args.embed:
             print(f"raw-embeddings\t{count}", file=stdout)
 
