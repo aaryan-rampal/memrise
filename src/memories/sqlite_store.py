@@ -659,7 +659,7 @@ class SQLiteMemoryStore:
     @staticmethod
     def _fts_query(query: str) -> str:
         terms = [term.strip('"') for term in query.split() if term.strip('"')]
-        return " ".join(f'"{term}"' for term in terms)
+        return " OR ".join(f'"{term}"' for term in terms)
 
     @staticmethod
     def _vector_from_row(row: sqlite3.Row) -> list[float]:
