@@ -43,6 +43,7 @@ MEMORIES_CLAUDE_EXPORT_DIR=~/Downloads/claude-export \
   PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw-chats link-sources
 PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw-chats canonicalize
 PYTHONPATH=src .venv/bin/python -m memories.cli --no-help raw-chats index
+PYTHONPATH=src .venv/bin/python -m memories.cli --no-help curated import
 ```
 
 If raw search output is too large, change presentation code to emit snippets

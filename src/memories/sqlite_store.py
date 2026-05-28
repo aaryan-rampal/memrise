@@ -127,6 +127,34 @@ class SQLiteMemoryStore:
             )
         return stored
 
+    def upsert_memories(self, memories: list[Memory]) -> None:
+        """Persist memories with caller-provided stable ids and refresh FTS rows."""
+        if not memories:
+            return
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO memories
+                  (id, content, source, memory_type, importance, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  content = excluded.content,
+                  source = excluded.source,
+                  memory_type = excluded.memory_type,
+                  importance = excluded.importance,
+                  updated_at = excluded.updated_at
+                """,
+                [self._memory_values(memory) for memory in memories],
+            )
+            connection.executemany(
+                "DELETE FROM memory_fts WHERE id = ?",
+                [(memory.id,) for memory in memories],
+            )
+            connection.executemany(
+                "INSERT INTO memory_fts (id, content) VALUES (?, ?)",
+                [(memory.id, memory.content) for memory in memories],
+            )
+
     def save_embedding(self, memory_id: str, embedding: Embedding) -> None:
         """Persist one embedding for a memory."""
         if self.get(memory_id) is None:

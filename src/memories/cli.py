@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -12,7 +14,15 @@ from loguru import logger
 
 from memories.embedder import OpenRouterEmbedder
 from memories.logging import configure_logging
-from memories.models import AddMemory, RawArtifact, RawArtifactSearchMatch, RawArtifactSpan
+from memories.models import (
+    AddMemory,
+    Memory,
+    MemoryType,
+    RawArtifact,
+    RawArtifactSearchMatch,
+    RawArtifactSpan,
+    Source,
+)
 from memories.raw_artifacts import RawArtifactIndexOptions, index_canonical_chats
 from memories.raw_chats import ensure_raw_chat_links, write_canonical_chats
 from memories.service import MemoryService
@@ -28,7 +38,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from memories.embedder import Embedder, HttpPost
-    from memories.models import Memory
 
 
 @dataclass(frozen=True)
@@ -84,7 +93,7 @@ def main(
         )
         _print_guidance(args, stdout)
         _dispatch(args, service, store, stdout)
-    except ValueError as error:
+    except (FileNotFoundError, TypeError, ValueError) as error:
         print(f"error: {error}", file=stderr)
         return 1
     return 0
@@ -127,6 +136,8 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     embeddings_subparsers.add_parser("clear")
+
+    _curated_parser(subparsers)
 
     recent = subparsers.add_parser("recent")
     recent.add_argument("--limit", type=int, default=8)
@@ -177,6 +188,13 @@ def _parser() -> argparse.ArgumentParser:
     raw_show.add_argument("--end", type=int, default=None)
     raw_show.add_argument("--full", choices=["true", "false"], default="false")
     return parser
+
+
+def _curated_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    curated = subparsers.add_parser("curated")
+    curated_subparsers = curated.add_subparsers(dest="curated_command", required=True)
+    curated_import = curated_subparsers.add_parser("import")
+    curated_import.add_argument("--input", type=Path, default=Path("data/curated/memories.jsonl"))
 
 
 def _metadata_args(parser: argparse.ArgumentParser) -> None:
@@ -234,6 +252,7 @@ def _print_guidance(args: argparse.Namespace, stdout: TextIO) -> None:
         "recent": "Lists newest memories first. Use --no-help to hide this guidance.",
         "update": "Updates one memory by id. Use --no-help to hide this guidance.",
         "delete": "Deletes one memory by id. Use --no-help to hide this guidance.",
+        "curated": "Imports curated memories from JSONL. Use --no-help to hide this guidance.",
         "raw-chats": (
             "Links and canonicalizes raw chat exports. Use --no-help to hide this guidance."
         ),
@@ -276,8 +295,90 @@ def _dispatch(
     elif args.command == "delete":
         deleted = service.delete_memory(args.id)
         print(f"deleted {args.id}" if deleted else f"missing {args.id}", file=stdout)
+    elif args.command == "curated":
+        _dispatch_curated(args, store, stdout)
     elif args.command == "raw":
         _dispatch_raw(args, store, stdout)
+
+
+def _dispatch_curated(
+    args: argparse.Namespace,
+    store: SQLiteMemoryStore,
+    stdout: TextIO,
+) -> None:
+    if args.curated_command == "import":
+        memories = _curated_memories_from_jsonl(args.input)
+        store.upsert_memories(memories)
+        print(f"curated-imported\t{len(memories)}", file=stdout)
+
+
+def _curated_memories_from_jsonl(path: Path) -> list[Memory]:
+    timestamp = int(time.time())
+    memories: list[Memory] = []
+    with path.open(encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            if line.strip():
+                memories.append(_curated_memory_from_json(line, path, line_number, timestamp))
+    return memories
+
+
+def _curated_memory_from_json(
+    line: str,
+    path: Path,
+    line_number: int,
+    timestamp: int,
+) -> Memory:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError as error:
+        msg = f"{path}:{line_number}: invalid JSON: {error.msg}"
+        raise ValueError(msg) from error
+    if not isinstance(payload, dict):
+        msg = f"{path}:{line_number}: curated memory must be a JSON object"
+        raise TypeError(msg)
+    add_memory = AddMemory(
+        content=_required_string(payload, "content", path, line_number),
+        source=str(payload.get("source", "codex")),
+        memory_type=str(payload.get("memory_type", "fact")),
+        importance=float(payload.get("importance", 0.5)),
+    )
+    source = Source.parse(add_memory.source)
+    memory_type = MemoryType.parse(add_memory.memory_type)
+    return Memory(
+        id=_curated_memory_id(payload, add_memory),
+        content=add_memory.content,
+        source=source,
+        memory_type=memory_type,
+        importance=add_memory.importance,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def _required_string(
+    payload: dict[object, object],
+    field: str,
+    path: Path,
+    line_number: int,
+) -> str:
+    value = payload.get(field)
+    if isinstance(value, str):
+        return value
+    msg = f"{path}:{line_number}: '{field}' must be a string"
+    raise ValueError(msg)
+
+
+def _curated_memory_id(payload: dict[object, object], memory: AddMemory) -> str:
+    raw_id = payload.get("id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        return raw_id.strip()
+    stable_payload = {
+        "content": memory.content,
+        "source": Source.parse(memory.source).value,
+        "memory_type": MemoryType.parse(memory.memory_type).value,
+    }
+    encoded = json.dumps(stable_payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _dispatch_raw(

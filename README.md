@@ -57,6 +57,12 @@ Full raw artifact output requires an explicit boolean:
 mem raw show <raw-id> --full true
 ```
 
+Import curated memories from ignored JSONL:
+
+```bash
+mem curated import --input data/curated/memories.jsonl
+```
+
 Allowed sources:
 
 ```text
@@ -77,6 +83,7 @@ Raw chat conversion is a two-step process:
 MEMORIES_CLAUDE_EXPORT_DIR=~/Downloads/claude-export mem raw-chats link-sources
 mem raw-chats canonicalize
 mem raw-chats index
+mem curated import --input data/curated/memories.jsonl
 ```
 
 The default source layout is:

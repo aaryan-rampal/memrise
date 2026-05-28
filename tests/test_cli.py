@@ -116,6 +116,107 @@ def test_search_finds_memory_added_by_cli(tmp_path: Path) -> None:
     assert "decision" in stdout
 
 
+def test_curated_import_adds_jsonl_memories_to_search_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+    input_path = tmp_path / "curated" / "memories.jsonl"
+    input_path.parent.mkdir()
+    input_path.write_text(
+        json.dumps(
+            {
+                "content": "Curated ingestion keeps durable preferences searchable.",
+                "source": "codex",
+                "memory_type": "preference",
+                "importance": 0.8,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "content": "Raw artifacts stay separate from synthesized memory.",
+                "source": "claude",
+                "memory_type": "decision",
+                "importance": 0.7,
+            }
+        )
+        + "\n"
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "curated",
+            "import",
+            "--input",
+            str(input_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert stdout == "curated-imported\t2\n"
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "search",
+            "durable preferences",
+            "--scope",
+            "memories",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert "Curated ingestion keeps durable preferences searchable." in stdout
+    assert "preference" in stdout
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "curated",
+            "import",
+            "--input",
+            str(input_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert stdout == "curated-imported\t2\n"
+
+    store = SQLiteMemoryStore(db_path)
+    assert len(store.recent(10)) == 2
+
+
+def test_curated_import_reports_invalid_json_line(tmp_path: Path) -> None:
+    db_path = tmp_path / "memories.sqlite3"
+    input_path = tmp_path / "memories.jsonl"
+    input_path.write_text('{"content": "valid"}\n{"content": \n')
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--db",
+            str(db_path),
+            "--no-help",
+            "curated",
+            "import",
+            "--input",
+            str(input_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert stdout == ""
+    assert f"{input_path}:2" in stderr
+    assert "invalid JSON" in stderr
+
+
 def test_add_rejects_embedding_writes_while_disabled(tmp_path: Path) -> None:
     db_path = tmp_path / "memories.sqlite3"
 

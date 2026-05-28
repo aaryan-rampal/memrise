@@ -16,6 +16,10 @@
   - Current: search supports only `--limit` and returns the first page of results (`memories/cli.py` and `SQLiteMemoryStore.search_raw_artifacts`).
   - Next step: add offset/page parameters (and CLI flags) with deterministic ordering guarantees to avoid returning the same top-N window repeatedly.
 
+- [ ] Make raw chat indexing incremental
+  - Current: `raw-chats index` replaces indexed raw artifacts for the selected providers and rebuilds derived FTS rows, which makes reruns slower than a fresh DB rebuild.
+  - Next step: detect unchanged canonical conversations and upsert only added/changed artifacts while deleting stale artifacts for the selected providers.
+
 - [ ] Improve raw search ranking with a smarter heuristic filter
   - Current: ordering is currently raw-FTS `bm25(...)` + `span_index` in the SQL query.
   - Next step: add a reranking layer after lexical retrieval (e.g., overlap score, distinct query-term coverage, role/provider recency bias, message-window freshness) and return scored matches.
@@ -23,5 +27,6 @@
 - [ ] Current-state check to remember
   - Embeddings: implemented in code paths, currently disabled in CLI dispatch and blocked in user-facing commands.
   - Co-occurrence index: not present.
+  - Raw-chat incremental indexing: not present.
   - Raw-search pagination: not present.
   - Raw-search ranking: lexical BM25 ordering only.
